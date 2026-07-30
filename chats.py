@@ -201,7 +201,7 @@ section[data-testid="stSidebar"] {{ background: rgba(10, 14, 39, 0.6); backdrop-
 ::-webkit-scrollbar {{ width: 8px; }}
 ::-webkit-scrollbar-thumb {{ background: {theme['primary']}66; border-radius: 4px; }}
 
-.info-btn button {{
+div.st-key-info_btn_wrap button {{
     border-radius: 50% !important;
     width: 42px; height: 42px;
     font-weight: 700;
@@ -363,10 +363,9 @@ with header_l:
     st.markdown(f'<p class="chat-title"># {room}</p>', unsafe_allow_html=True)
     st.markdown(f'<p class="chat-sub">{len(data["rooms"][room])} messages</p>', unsafe_allow_html=True)
 with header_r:
-    st.markdown('<div class="info-btn">', unsafe_allow_html=True)
-    if st.button("ℹ️", help="See recent activity across all rooms", key="info_btn"):
-        show_recent_activity()
-    st.markdown('</div>', unsafe_allow_html=True)
+    with st.container(key="info_btn_wrap"):
+        if st.button("ℹ️", help="See recent activity across all rooms", key="info_btn"):
+            show_recent_activity()
 
 st.session_state.search_query = st.text_input(
     "Search", placeholder="🔍 Search messages in this room...", label_visibility="collapsed",
