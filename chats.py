@@ -260,19 +260,18 @@ def show_recent_activity():
 
     for m in all_msgs[:25]:
         color = avatar_color(m["name"])
-        st.markdown(f"""
-        <div style="display:flex; gap:10px; align-items:flex-start; margin-bottom:10px;">
-            <div class="avatar" style="background:{color};">{initials(m['name'])}</div>
-            <div>
-                <div class="msg-meta">
-                    <b style="color:white;">{m['name']}</b>
-                    <span class="room-badge">#{m['room']}</span>
-                    · {relative_time(m.get('time',''))}
-                </div>
-                <div style="color: rgba(255,255,255,0.85);">{m['text']}</div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
+        st.markdown(
+            f'<div style="display:flex; gap:10px; align-items:flex-start; margin-bottom:10px;">'
+            f'<div class="avatar" style="background:{color};">{initials(m["name"])}</div>'
+            f'<div><div class="msg-meta">'
+            f'<b style="color:white;">{m["name"]}</b> '
+            f'<span class="room-badge">#{m["room"]}</span> '
+            f'· {relative_time(m.get("time",""))}'
+            f'</div>'
+            f'<div style="color: rgba(255,255,255,0.85);">{m["text"]}</div>'
+            f'</div></div>',
+            unsafe_allow_html=True,
+        )
 
     if st.button("Close", use_container_width=True):
         st.rerun()
@@ -283,12 +282,15 @@ def show_recent_activity():
 with st.sidebar:
     st.markdown(f'<p class="chat-title" style="font-size:1.5rem;">💬 NebulaChat</p>', unsafe_allow_html=True)
     my_color = avatar_color(st.session_state.username)
-    st.markdown(f"""
-    <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
-        <div class="avatar" style="background:{my_color};">{initials(st.session_state.username)}</div>
-        <div><b>{st.session_state.username}</b><br><span class="online-dot"></span> <span style="font-size:0.75rem; color:rgba(255,255,255,0.5);">online</span></div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown(
+        f'<div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">'
+        f'<div class="avatar" style="background:{my_color};">{initials(st.session_state.username)}</div>'
+        f'<div><b>{st.session_state.username}</b><br>'
+        f'<span class="online-dot"></span> '
+        f'<span style="font-size:0.75rem; color:rgba(255,255,255,0.5);">online</span></div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
     st.divider()
 
     st.session_state.theme = st.selectbox("Theme", list(THEMES.keys()),
@@ -399,15 +401,14 @@ def render_chat():
                 f'{relative_time(msg.get("time",""))}</div>'
             ) if show_meta else ""
 
-            st.markdown(f"""
-            <div class="{row_class}">
-                <div class="avatar" style="background:{color};">{initials(msg['name'])}</div>
-                <div>
-                    {meta_html}
-                    <div class="{bubble_class}">{msg['text']}</div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
+            st.markdown(
+                f'<div class="{row_class}">'
+                f'<div class="avatar" style="background:{color};">{initials(msg["name"])}</div>'
+                f'<div>{meta_html}'
+                f'<div class="{bubble_class}">{msg["text"]}</div>'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
 
 
 render_chat()
