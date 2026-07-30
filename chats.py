@@ -145,23 +145,25 @@ html, body, [class*="css"] {{ font-family: 'Outfit', sans-serif; }}
 
 .chat-sub {{ color: rgba(255,255,255,0.5); font-size: 0.95rem; margin-top: -8px; }}
 
-.msg-row {{ display: flex; align-items: flex-start; gap: 8px; margin: 10px 0; }}
+.msg-row {{ display: flex; align-items: flex-start; gap: 10px; margin: 14px 0; }}
 .msg-row.mine {{ flex-direction: row-reverse; }}
 
 .avatar {{
-    width: 34px; height: 34px; min-width: 34px;
+    width: 38px; height: 38px; min-width: 38px;
     border-radius: 50%;
     display: flex; align-items: center; justify-content: center;
-    font-size: 0.75rem; font-weight: 700; color: #0A0E27;
+    font-size: 0.8rem; font-weight: 700; color: #0A0E27;
     box-shadow: 0 0 10px rgba(0,0,0,0.3);
+    margin-top: 2px;
 }}
 
 .msg-bubble-mine {{
     background: linear-gradient(135deg, {theme['primary']}44, {theme['secondary']}22);
     border: 1px solid {theme['primary']}66;
     border-radius: 16px 16px 4px 16px;
-    padding: 0.6rem 1rem;
+    padding: 0.75rem 1.1rem;
     color: white;
+    line-height: 1.5;
     max-width: 70%;
 }}
 
@@ -169,12 +171,13 @@ html, body, [class*="css"] {{ font-family: 'Outfit', sans-serif; }}
     background: rgba(255,255,255,0.07);
     border: 1px solid rgba(255,255,255,0.12);
     border-radius: 16px 16px 16px 4px;
-    padding: 0.6rem 1rem;
+    padding: 0.75rem 1.1rem;
     color: white;
+    line-height: 1.5;
     max-width: 70%;
 }}
 
-.msg-meta {{ font-size: 0.7rem; color: rgba(255,255,255,0.4); margin-bottom: 3px; }}
+.msg-meta {{ font-size: 0.72rem; color: rgba(255,255,255,0.4); margin-bottom: 5px; }}
 .msg-meta.mine {{ text-align: right; }}
 
 .room-badge {{
@@ -200,6 +203,8 @@ html, body, [class*="css"] {{ font-family: 'Outfit', sans-serif; }}
 section[data-testid="stSidebar"] {{ background: rgba(10, 14, 39, 0.6); backdrop-filter: blur(10px); }}
 ::-webkit-scrollbar {{ width: 8px; }}
 ::-webkit-scrollbar-thumb {{ background: {theme['primary']}66; border-radius: 4px; }}
+
+div.st-key-chat_scroll {{ padding: 8px 14px; }}
 
 div.st-key-info_btn_wrap button {{
     border-radius: 50% !important;
@@ -383,7 +388,7 @@ def render_chat():
     if query:
         msgs = [m for m in msgs if query in m["text"].lower()]
 
-    with st.container(height=440):
+    with st.container(height=480, key="chat_scroll"):
         if not msgs:
             st.caption("No messages match yet." if query else "No messages yet — say hello 👋")
         last_sender = None
