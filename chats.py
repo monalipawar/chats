@@ -1,8 +1,8 @@
 import streamlit as st
 import json
 import os
-import time
 import uuid
+import hashlib
 from datetime import datetime
 
 # ---------------------------------------------------------------------------
@@ -11,7 +11,7 @@ from datetime import datetime
 st.set_page_config(page_title="NebulaChat", page_icon="💬", layout="wide")
 
 DATA_FILE = "nebulachat_data.json"
-REFRESH_INTERVAL = 3  # seconds, for auto-refresh polling
+REFRESH_INTERVAL = 3  # seconds
 
 THEMES = {
     "Default": {"primary": "#7B61FF", "secondary": "#00D9FF", "bg1": "#0A0E27", "bg2": "#1A1E3F"},
@@ -20,6 +20,36 @@ THEMES = {
     "Ocean": {"primary": "#00B4D8", "secondary": "#48CAE4", "bg1": "#03071E", "bg2": "#0A1128"},
     "Midnight": {"primary": "#9D4EDD", "secondary": "#5A189A", "bg1": "#000000", "bg2": "#10002B"},
 }
+
+AVATAR_PALETTE = ["#FF6B6B", "#4ECDC4", "#FFD93D", "#7B61FF", "#00D9FF",
+                   "#FF8C42", "#9D4EDD", "#48CAE4", "#FF2E63", "#06D6A0"]
+
+
+def avatar_color(name):
+    h = int(hashlib.md5(name.encode()).hexdigest(), 16)
+    return AVATAR_PALETTE[h % len(AVATAR_PALETTE)]
+
+
+def initials(name):
+    parts = name.strip().split()
+    if len(parts) == 1:
+        return parts[0][:2].upper()
+    return (parts[0][0] + parts[-1][0]).upper()
+
+
+def relative_time(iso_str):
+    try:
+        t = datetime.fromisoformat(iso_str)
+    except Exception:
+        return ""
+    diff = (datetime.now() - t).total_seconds()
+    if diff < 60:
+        return "just now"
+    if diff < 3600:
+        return f"{int(diff // 60)}m ago"
+    if diff < 86400:
+        return f"{int(diff // 3600)}h ago"
+    return t.strftime("%b %d, %H:%M")
 
 # ---------------------------------------------------------------------------
 # DATA LAYER
@@ -55,8 +85,10 @@ if "current_room" not in st.session_state:
     st.session_state.current_room = "General"
 if "theme" not in st.session_state:
     st.session_state.theme = "Default"
-if "last_refresh" not in st.session_state:
-    st.session_state.last_refresh = time.time()
+if "last_read" not in st.session_state:
+    st.session_state.last_read = {}
+if "search_query" not in st.session_state:
+    st.session_state.search_query = ""
 
 theme = THEMES[st.session_state.theme]
 
@@ -67,9 +99,7 @@ st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');
 
-html, body, [class*="css"] {{
-    font-family: 'Outfit', sans-serif;
-}}
+html, body, [class*="css"] {{ font-family: 'Outfit', sans-serif; }}
 
 .stApp {{
     background: radial-gradient(ellipse at top, {theme['bg2']} 0%, {theme['bg1']} 60%);
@@ -110,67 +140,72 @@ html, body, [class*="css"] {{
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     margin-bottom: 0;
+    display: inline-block;
 }}
 
-.chat-sub {{
-    color: rgba(255,255,255,0.5);
-    font-size: 0.95rem;
-    margin-top: -8px;
+.chat-sub {{ color: rgba(255,255,255,0.5); font-size: 0.95rem; margin-top: -8px; }}
+
+.msg-row {{ display: flex; align-items: flex-start; gap: 8px; margin: 10px 0; }}
+.msg-row.mine {{ flex-direction: row-reverse; }}
+
+.avatar {{
+    width: 34px; height: 34px; min-width: 34px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 0.75rem; font-weight: 700; color: #0A0E27;
+    box-shadow: 0 0 10px rgba(0,0,0,0.3);
 }}
 
 .msg-bubble-mine {{
-    background: linear-gradient(135deg, {theme['primary']}33, {theme['secondary']}22);
-    border: 1px solid {theme['primary']}55;
+    background: linear-gradient(135deg, {theme['primary']}44, {theme['secondary']}22);
+    border: 1px solid {theme['primary']}66;
     border-radius: 16px 16px 4px 16px;
-    padding: 0.7rem 1rem;
-    margin: 6px 0;
-    margin-left: 20%;
+    padding: 0.6rem 1rem;
     color: white;
+    max-width: 70%;
 }}
 
 .msg-bubble-other {{
-    background: rgba(255,255,255,0.06);
-    border: 1px solid rgba(255,255,255,0.1);
+    background: rgba(255,255,255,0.07);
+    border: 1px solid rgba(255,255,255,0.12);
     border-radius: 16px 16px 16px 4px;
-    padding: 0.7rem 1rem;
-    margin: 6px 0;
-    margin-right: 20%;
+    padding: 0.6rem 1rem;
     color: white;
+    max-width: 70%;
 }}
 
-.msg-meta {{
-    font-size: 0.72rem;
-    color: rgba(255,255,255,0.4);
-    margin-bottom: 2px;
-}}
+.msg-meta {{ font-size: 0.7rem; color: rgba(255,255,255,0.4); margin-bottom: 3px; }}
+.msg-meta.mine {{ text-align: right; }}
 
-.room-pill {{
-    display: inline-block;
-    padding: 4px 14px;
-    border-radius: 999px;
-    background: rgba(255,255,255,0.08);
-    border: 1px solid rgba(255,255,255,0.15);
-    color: white;
-    font-size: 0.85rem;
-    margin-right: 6px;
+.room-badge {{
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 10px; border-radius: 999px;
+    background: {theme['primary']}33; color: {theme['secondary']};
+    font-size: 0.72rem; font-weight: 600;
 }}
 
 .online-dot {{
     height: 8px; width: 8px;
     background-color: {theme['secondary']};
-    border-radius: 50%;
-    display: inline-block;
-    margin-right: 6px;
+    border-radius: 50%; display: inline-block;
     box-shadow: 0 0 8px {theme['secondary']};
 }}
 
-section[data-testid="stSidebar"] {{
-    background: rgba(10, 14, 39, 0.6);
-    backdrop-filter: blur(10px);
+.unread-badge {{
+    background: {theme['primary']};
+    color: white; font-size: 0.65rem; font-weight: 700;
+    border-radius: 999px; padding: 1px 7px; margin-left: 6px;
 }}
 
+section[data-testid="stSidebar"] {{ background: rgba(10, 14, 39, 0.6); backdrop-filter: blur(10px); }}
 ::-webkit-scrollbar {{ width: 8px; }}
 ::-webkit-scrollbar-thumb {{ background: {theme['primary']}66; border-radius: 4px; }}
+
+.info-btn button {{
+    border-radius: 50% !important;
+    width: 42px; height: 42px;
+    font-weight: 700;
+}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -200,12 +235,60 @@ if not st.session_state.username:
     st.stop()
 
 # ---------------------------------------------------------------------------
+# RECENT ACTIVITY DIALOG (the "i" button)
+# ---------------------------------------------------------------------------
+@st.dialog("🕐 Recent Activity", width="large")
+def show_recent_activity():
+    live_data = load_data()
+    all_msgs = []
+    for room_name, msgs in live_data["rooms"].items():
+        for m in msgs:
+            all_msgs.append({**m, "room": room_name})
+    all_msgs.sort(key=lambda m: m.get("time", ""), reverse=True)
+
+    if not all_msgs:
+        st.info("No messages anywhere yet — be the first to say something!")
+        return
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Messages", len(all_msgs))
+    c2.metric("Rooms", len(live_data["rooms"]))
+    c3.metric("Users seen", len(live_data["users"]))
+
+    st.divider()
+    st.caption("Most recent across all rooms")
+
+    for m in all_msgs[:25]:
+        color = avatar_color(m["name"])
+        st.markdown(f"""
+        <div style="display:flex; gap:10px; align-items:flex-start; margin-bottom:10px;">
+            <div class="avatar" style="background:{color};">{initials(m['name'])}</div>
+            <div>
+                <div class="msg-meta">
+                    <b style="color:white;">{m['name']}</b>
+                    <span class="room-badge">#{m['room']}</span>
+                    · {relative_time(m.get('time',''))}
+                </div>
+                <div style="color: rgba(255,255,255,0.85);">{m['text']}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    if st.button("Close", use_container_width=True):
+        st.rerun()
+
+# ---------------------------------------------------------------------------
 # SIDEBAR
 # ---------------------------------------------------------------------------
 with st.sidebar:
     st.markdown(f'<p class="chat-title" style="font-size:1.5rem;">💬 NebulaChat</p>', unsafe_allow_html=True)
-    st.markdown(f"**{st.session_state.username}** <span class='online-dot'></span>", unsafe_allow_html=True)
-    st.caption(f"user id: {st.session_state.user_id}")
+    my_color = avatar_color(st.session_state.username)
+    st.markdown(f"""
+    <div style="display:flex; align-items:center; gap:8px; margin-bottom:4px;">
+        <div class="avatar" style="background:{my_color};">{initials(st.session_state.username)}</div>
+        <div><b>{st.session_state.username}</b><br><span class="online-dot"></span> <span style="font-size:0.75rem; color:rgba(255,255,255,0.5);">online</span></div>
+    </div>
+    """, unsafe_allow_html=True)
     st.divider()
 
     st.session_state.theme = st.selectbox("Theme", list(THEMES.keys()),
@@ -215,11 +298,20 @@ with st.sidebar:
     st.subheader("Rooms")
     room_names = list(data["rooms"].keys())
     for r in room_names:
-        count = len(data["rooms"][r])
-        label = f"# {r}  ({count})"
-        if st.button(label, key=f"room_{r}", use_container_width=True):
-            st.session_state.current_room = r
-            st.rerun()
+        msgs = data["rooms"][r]
+        seen = st.session_state.last_read.get(r, 0)
+        unread = max(0, len(msgs) - seen)
+        active = (r == st.session_state.current_room)
+        label = f"{'▶ ' if active else ''}# {r}"
+        col_a, col_b = st.columns([4, 1])
+        with col_a:
+            if st.button(label, key=f"room_{r}", use_container_width=True):
+                st.session_state.current_room = r
+                st.session_state.last_read[r] = len(msgs)
+                st.rerun()
+        with col_b:
+            if unread > 0 and not active:
+                st.markdown(f'<span class="unread-badge">{unread}</span>', unsafe_allow_html=True)
 
     with st.expander("➕ New room"):
         new_room = st.text_input("Room name", key="new_room_input")
@@ -264,26 +356,62 @@ room = st.session_state.current_room
 if room not in data["rooms"]:
     room = "General"
     st.session_state.current_room = room
+st.session_state.last_read[room] = len(data["rooms"][room])
 
-st.markdown(f'<p class="chat-title"># {room}</p>', unsafe_allow_html=True)
-st.markdown(f'<p class="chat-sub">{len(data["rooms"][room])} messages</p>', unsafe_allow_html=True)
+header_l, header_r = st.columns([6, 1])
+with header_l:
+    st.markdown(f'<p class="chat-title"># {room}</p>', unsafe_allow_html=True)
+    st.markdown(f'<p class="chat-sub">{len(data["rooms"][room])} messages</p>', unsafe_allow_html=True)
+with header_r:
+    st.markdown('<div class="info-btn">', unsafe_allow_html=True)
+    if st.button("ℹ️", help="See recent activity across all rooms", key="info_btn"):
+        show_recent_activity()
+    st.markdown('</div>', unsafe_allow_html=True)
 
-chat_container = st.container(height=460)
-with chat_container:
-    for msg in data["rooms"][room]:
-        is_mine = msg["user_id"] == st.session_state.user_id
-        bubble_class = "msg-bubble-mine" if is_mine else "msg-bubble-other"
-        ts = msg.get("time", "")
-        try:
-            ts_display = datetime.fromisoformat(ts).strftime("%H:%M")
-        except Exception:
-            ts_display = ""
-        st.markdown(f"""
-        <div class="{bubble_class}">
-            <div class="msg-meta">{msg['name']} · {ts_display}</div>
-            {msg['text']}
-        </div>
-        """, unsafe_allow_html=True)
+st.session_state.search_query = st.text_input(
+    "Search", placeholder="🔍 Search messages in this room...", label_visibility="collapsed",
+    value=st.session_state.search_query
+)
+
+
+@st.fragment(run_every=REFRESH_INTERVAL if auto_refresh else None)
+def render_chat():
+    live_data = load_data()
+    msgs = live_data["rooms"].get(room, [])
+    query = st.session_state.search_query.strip().lower()
+    if query:
+        msgs = [m for m in msgs if query in m["text"].lower()]
+
+    with st.container(height=440):
+        if not msgs:
+            st.caption("No messages match yet." if query else "No messages yet — say hello 👋")
+        last_sender = None
+        for msg in msgs:
+            is_mine = msg["user_id"] == st.session_state.user_id
+            row_class = "msg-row mine" if is_mine else "msg-row"
+            bubble_class = "msg-bubble-mine" if is_mine else "msg-bubble-other"
+            meta_class = "msg-meta mine" if is_mine else "msg-meta"
+            color = avatar_color(msg["name"])
+            show_meta = (msg["name"] != last_sender)
+            last_sender = msg["name"]
+
+            meta_html = (
+                f'<div class="{meta_class}"><b style="color:white;">{msg["name"]}</b> · '
+                f'{relative_time(msg.get("time",""))}</div>'
+            ) if show_meta else ""
+
+            st.markdown(f"""
+            <div class="{row_class}">
+                <div class="avatar" style="background:{color};">{initials(msg['name'])}</div>
+                <div>
+                    {meta_html}
+                    <div class="{bubble_class}">{msg['text']}</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+
+
+render_chat()
 
 # ---------------------------------------------------------------------------
 # MESSAGE INPUT
@@ -296,21 +424,16 @@ with st.form("send_form", clear_on_submit=True):
         submitted = st.form_submit_button("Send 🚀", use_container_width=True)
 
     if submitted and text.strip():
-        data["rooms"][room].append({
+        fresh = load_data()
+        fresh["rooms"].setdefault(room, [])
+        fresh["rooms"][room].append({
             "user_id": st.session_state.user_id,
             "name": st.session_state.username,
             "text": text.strip(),
             "time": datetime.now().isoformat(),
         })
-        # keep last 500 messages per room
-        data["rooms"][room] = data["rooms"][room][-500:]
-        save_data(data)
+        fresh["rooms"][room] = fresh["rooms"][room][-500:]
+        save_data(fresh)
+        st.session_state.data = fresh
+        st.session_state.last_read[room] = len(fresh["rooms"][room])
         st.rerun()
-
-# ---------------------------------------------------------------------------
-# AUTO-REFRESH (polling, simulates live multi-user updates)
-# ---------------------------------------------------------------------------
-if auto_refresh:
-    time.sleep(REFRESH_INTERVAL)
-    st.session_state.data = load_data()
-    st.rerun()
