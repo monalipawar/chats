@@ -487,7 +487,7 @@ with st.sidebar:
                     fresh = load_data()
                     fresh["users"].pop(uid, None)
                     save_data(fresh)
-                        st.rerun()
+                    st.rerun()
         else:
             st.caption(f"{dot} {u['name']}")
 
@@ -601,7 +601,7 @@ def render_chat():
                         m for m in fresh["rooms"].get(room, []) if m.get("id") != msg_id
                     ]
                     save_data(fresh)
-                        st.rerun()
+                    st.rerun()
 
 
 render_chat()
