@@ -470,26 +470,36 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Who's around")
-    now = datetime.now()
-    for uid, u in list(data.get("users", {}).items()):
-        try:
-            last_seen = datetime.fromisoformat(u["last_seen"])
-            active = (now - last_seen).total_seconds() < 30
-        except Exception:
-            active = False
-        dot = "🟢" if active else "⚪"
-        if st.session_state.is_admin:
-            col_u, col_del = st.columns([5, 1])
-            with col_u:
+
+    @st.fragment(run_every=REFRESH_INTERVAL)
+    def render_presence():
+        live = load_data()
+        if st.session_state.user_id in live["users"]:
+            live["users"][st.session_state.user_id]["last_seen"] = datetime.now().isoformat()
+            save_data(live)
+
+        now = datetime.now()
+        for uid, u in list(live.get("users", {}).items()):
+            try:
+                last_seen = datetime.fromisoformat(u["last_seen"])
+                active = (now - last_seen).total_seconds() < 30
+            except Exception:
+                active = False
+            dot = "🟢" if active else "⚪"
+            if st.session_state.is_admin:
+                col_u, col_del = st.columns([5, 1])
+                with col_u:
+                    st.caption(f"{dot} {u['name']}")
+                with col_del:
+                    if st.button("🗑️", key=f"deluser_{uid}", help=f"Remove {u['name']}"):
+                        fresh = load_data()
+                        fresh["users"].pop(uid, None)
+                        save_data(fresh)
+                        st.rerun()
+            else:
                 st.caption(f"{dot} {u['name']}")
-            with col_del:
-                if st.button("🗑️", key=f"deluser_{uid}", help=f"Remove {u['name']}"):
-                    fresh = load_data()
-                    fresh["users"].pop(uid, None)
-                    save_data(fresh)
-                    st.rerun()
-        else:
-            st.caption(f"{dot} {u['name']}")
+
+    render_presence()
 
     with st.expander("🔑 Admin"):
         if st.session_state.is_admin:
@@ -524,11 +534,10 @@ with st.sidebar:
         st.rerun()
 
 # ---------------------------------------------------------------------------
-# UPDATE LAST SEEN
+# NOTE: presence (last_seen) is now kept alive continuously via the
+# render_presence() fragment above, so it no longer depends on full-page
+# reruns like the chat message polling does.
 # ---------------------------------------------------------------------------
-if st.session_state.user_id in data["users"]:
-    data["users"][st.session_state.user_id]["last_seen"] = datetime.now().isoformat()
-    save_data(data)
 
 # ---------------------------------------------------------------------------
 # MAIN CHAT AREA
