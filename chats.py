@@ -187,6 +187,24 @@ if "is_admin" not in st.session_state:
 
 theme = THEMES[st.session_state.theme]
 
+# If this session's user_id was merged away (duplicate-name cleanup),
+# adopt whichever uid the users table now has for this name so we don't
+# spawn a fresh duplicate on the next message.
+if st.session_state.username and st.session_state.user_id not in data.get("users", {}):
+    for uid, u in data.get("users", {}).items():
+        if u.get("name", "").strip().lower() == st.session_state.username.strip().lower():
+            st.session_state.user_id = uid
+            st.query_params["uid"] = uid
+            components.html(
+                f"""
+                <script>
+                window.parent.localStorage.setItem('nebulachat_uid', {json.dumps(uid)});
+                </script>
+                """,
+                height=0,
+            )
+            break
+
 # ---------------------------------------------------------------------------
 # STYLING
 # ---------------------------------------------------------------------------
@@ -581,7 +599,8 @@ def render_chat():
                 )
             with del_col:
                 msg_id = msg.get("id")
-                if msg_id and st.button("✕", key=f"del_{msg_id}", help="Delete message"):
+                can_delete = msg_id and (is_mine or st.session_state.is_admin)
+                if can_delete and st.button("✕", key=f"del_{msg_id}", help="Delete message"):
                     fresh = load_data()
                     fresh["rooms"][room] = [
                         m for m in fresh["rooms"].get(room, []) if m.get("id") != msg_id
