@@ -125,10 +125,7 @@ def save_data(data):
         json.dump(data, f, indent=2)
 
 
-if "data" not in st.session_state:
-    st.session_state.data = load_data()
-
-data = st.session_state.data
+data = load_data()
 
 # ---------------------------------------------------------------------------
 # SESSION / IDENTITY
@@ -362,7 +359,6 @@ if not st.session_state.username:
 
                 st.session_state.username = entered_name
                 save_data(fresh)
-                st.session_state.data = fresh
                 st.query_params["uid"] = st.session_state.user_id
                 st.query_params["name"] = entered_name
                 components.html(
@@ -491,8 +487,7 @@ with st.sidebar:
                     fresh = load_data()
                     fresh["users"].pop(uid, None)
                     save_data(fresh)
-                    st.session_state.data = fresh
-                    st.rerun()
+                        st.rerun()
         else:
             st.caption(f"{dot} {u['name']}")
 
@@ -606,8 +601,7 @@ def render_chat():
                         m for m in fresh["rooms"].get(room, []) if m.get("id") != msg_id
                     ]
                     save_data(fresh)
-                    st.session_state.data = fresh
-                    st.rerun()
+                        st.rerun()
 
 
 render_chat()
@@ -634,6 +628,5 @@ with st.form("send_form", clear_on_submit=True):
         })
         fresh["rooms"][room] = fresh["rooms"][room][-500:]
         save_data(fresh)
-        st.session_state.data = fresh
         st.session_state.last_read[room] = len(fresh["rooms"][room])
         st.rerun()
