@@ -17,7 +17,13 @@ REFRESH_INTERVAL = 3  # seconds
 # Change this to whatever you like — whoever enters it in the sidebar
 # gets permission to remove people from "Who's around". Everyone can
 # already delete individual messages; only the admin can remove users.
-ADMIN_PASSCODE = "nebula-admin"
+# Set in Streamlit Cloud under Settings -> Secrets as:
+#   ADMIN_PASSCODE = "your-secret-here"
+# Falls back to a default only if no secret is configured (e.g. local dev).
+try:
+    ADMIN_PASSCODE = st.secrets["ADMIN_PASSCODE"]
+except Exception:
+    ADMIN_PASSCODE = "nebula-admin"
 
 THEMES = {
     "Default": {"primary": "#7B61FF", "secondary": "#00D9FF", "bg1": "#0A0E27", "bg2": "#1A1E3F"},
