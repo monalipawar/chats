@@ -70,10 +70,25 @@ def load_data():
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, "r") as f:
-                return json.load(f)
+                d = json.load(f)
         except Exception:
-            pass
-    return {"rooms": {"General": []}, "users": {}}
+            d = {"rooms": {"General": []}, "users": {}}
+    else:
+        d = {"rooms": {"General": []}, "users": {}}
+
+    # Backfill ids for messages saved before delete support existed,
+    # otherwise their delete button has nothing to key off of.
+    dirty = False
+    for room_msgs in d.get("rooms", {}).values():
+        for m in room_msgs:
+            if "id" not in m or not m["id"]:
+                m["id"] = str(uuid.uuid4())[:10]
+                dirty = True
+    if dirty:
+        with open(DATA_FILE, "w") as f:
+            json.dump(d, f, indent=2)
+
+    return d
 
 
 def save_data(data):
