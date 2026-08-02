@@ -72,6 +72,37 @@ def full_rerun():
     except TypeError:
         st.rerun()
 
+
+REACTIONS = ["👍", "❤️", "😂", "🎉", "😮"]
+
+
+def highlight_mentions(text, known_names):
+    """Wrap @name mentions in a highlight span if the name matches a
+    known user (case-insensitive). Longer names are matched first so
+    'Al' doesn't eat into 'Alex'."""
+    escaped = (
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    )
+    for n in sorted(known_names, key=len, reverse=True):
+        if not n:
+            continue
+        needle = "@" + n
+        idx = 0
+        lower_escaped = escaped.lower()
+        needle_lower = needle.lower()
+        out = []
+        while True:
+            pos = lower_escaped.find(needle_lower, idx)
+            if pos == -1:
+                out.append(escaped[idx:])
+                break
+            out.append(escaped[idx:pos])
+            out.append(f'<span class="mention">{escaped[pos:pos+len(needle)]}</span>')
+            idx = pos + len(needle)
+        escaped = "".join(out)
+        lower_escaped = escaped.lower()
+    return escaped
+
 # ---------------------------------------------------------------------------
 # DATA LAYER
 # ---------------------------------------------------------------------------
@@ -189,6 +220,10 @@ if "last_read" not in st.session_state:
     st.session_state.last_read = {}
 if "search_query" not in st.session_state:
     st.session_state.search_query = ""
+if "send_times" not in st.session_state:
+    st.session_state.send_times = []
+if "editing_msg_id" not in st.session_state:
+    st.session_state.editing_msg_id = None
 
 
 def is_admin_user():
@@ -352,6 +387,37 @@ div.st-key-info_btn_wrap button {{
     width: 42px; height: 42px;
     font-weight: 700;
 }}
+
+.mention {{
+    background: {theme['secondary']}33;
+    color: {theme['secondary']};
+    font-weight: 700;
+    padding: 0 3px;
+    border-radius: 4px;
+}}
+
+.reaction-pill {{
+    display: inline-block;
+    font-size: 0.72rem;
+    background: rgba(255,255,255,0.08);
+    border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 999px;
+    padding: 1px 8px;
+    margin: 2px 4px 2px 0;
+    color: rgba(255,255,255,0.8);
+}}
+.reaction-pill.mine {{
+    background: {theme['primary']}33;
+    border-color: {theme['primary']}88;
+    color: white;
+}}
+
+.edited-tag {{
+    font-size: 0.65rem;
+    color: rgba(255,255,255,0.35);
+    font-style: italic;
+    margin-left: 4px;
+}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -478,7 +544,11 @@ with st.sidebar:
         unread = max(0, len(msgs) - seen)
         active = (r == st.session_state.current_room)
         label = f"{'▶ ' if active else ''}# {r}"
-        col_a, col_b = st.columns([4, 1])
+        if is_admin_user() and len(room_names) > 1:
+            col_a, col_b, col_c = st.columns([4, 1, 1])
+        else:
+            col_a, col_b = st.columns([5, 1])
+            col_c = None
         with col_a:
             if st.button(label, key=f"room_{r}", use_container_width=True):
                 st.session_state.current_room = r
@@ -487,6 +557,15 @@ with st.sidebar:
         with col_b:
             if unread > 0 and not active:
                 st.markdown(f'<span class="unread-badge">{unread}</span>', unsafe_allow_html=True)
+        if col_c is not None:
+            with col_c:
+                if st.button("🗑️", key=f"delroom_{r}", help=f"Delete #{r}"):
+                    fresh = load_data()
+                    fresh["rooms"].pop(r, None)
+                    save_data(fresh)
+                    if st.session_state.current_room == r:
+                        st.session_state.current_room = next(iter(fresh["rooms"]), "General")
+                    full_rerun()
 
     with st.expander("➕ New room"):
         new_room = st.text_input("Room name", key="new_room_input")
@@ -606,6 +685,7 @@ st.session_state.search_query = st.text_input(
 def render_chat():
     live_data = load_data()
     msgs = live_data["rooms"].get(room, [])
+    known_names = [u.get("name", "") for u in live_data.get("users", {}).values()]
     # WhatsApp-style strict chronological order, oldest first
     msgs = sorted(msgs, key=lambda m: m.get("time", ""))
     query = st.session_state.search_query.strip().lower()
@@ -624,31 +704,89 @@ def render_chat():
             color = avatar_color(msg["name"])
             show_meta = (msg["name"] != last_sender)
             last_sender = msg["name"]
+            msg_id = msg.get("id")
 
+            edited_tag = '<span class="edited-tag">(edited)</span>' if msg.get("edited") else ""
             meta_html = (
                 f'<div class="{meta_class}"><b style="color:white;">{msg["name"]}</b> · '
-                f'{relative_time(msg.get("time",""))}</div>'
+                f'{relative_time(msg.get("time",""))}{edited_tag}</div>'
             ) if show_meta else ""
 
-            msg_id = msg.get("id")
             can_delete = msg_id and (is_mine or is_admin_user())
+            can_edit = msg_id and is_mine
 
+            if st.session_state.editing_msg_id == msg_id:
+                new_text = st.text_input(
+                    "Edit message", value=msg["text"], key=f"editbox_{msg_id}",
+                    label_visibility="collapsed",
+                )
+                ce1, ce2 = st.columns([1, 1])
+                with ce1:
+                    if st.button("💾 Save", key=f"savedit_{msg_id}", use_container_width=True):
+                        fresh = load_data()
+                        for m in fresh["rooms"].get(room, []):
+                            if m.get("id") == msg_id:
+                                m["text"] = new_text.strip() or m["text"]
+                                m["edited"] = True
+                        save_data(fresh)
+                        st.session_state.editing_msg_id = None
+                        full_rerun()
+                with ce2:
+                    if st.button("✕ Cancel", key=f"canceledit_{msg_id}", use_container_width=True):
+                        st.session_state.editing_msg_id = None
+                        full_rerun()
+                continue
+
+            bubble_text = highlight_mentions(msg["text"], known_names)
             st.markdown(
                 f'<div class="{row_class}">'
                 f'<div class="avatar" style="background:{color};">{initials(msg["name"])}</div>'
                 f'<div>{meta_html}'
-                f'<div class="{bubble_class}">{msg["text"]}</div>'
+                f'<div class="{bubble_class}">{bubble_text}</div>'
                 f'</div></div>',
                 unsafe_allow_html=True,
             )
+
+            # Reactions summary + picker
+            reactions = msg.get("reactions", {})
+            pill_html = ""
+            for emoji, uids in reactions.items():
+                if not uids:
+                    continue
+                mine_cls = " mine" if st.session_state.user_id in uids else ""
+                pill_html += f'<span class="reaction-pill{mine_cls}">{emoji} {len(uids)}</span>'
+            if pill_html:
+                st.markdown(pill_html, unsafe_allow_html=True)
+
+            action_cols = st.columns(len(REACTIONS) + 2)
+            for i, emoji in enumerate(REACTIONS):
+                with action_cols[i]:
+                    if st.button(emoji, key=f"react_{msg_id}_{emoji}", help=f"React {emoji}"):
+                        fresh = load_data()
+                        for m in fresh["rooms"].get(room, []):
+                            if m.get("id") == msg_id:
+                                m.setdefault("reactions", {}).setdefault(emoji, [])
+                                uids_list = m["reactions"][emoji]
+                                if st.session_state.user_id in uids_list:
+                                    uids_list.remove(st.session_state.user_id)
+                                else:
+                                    uids_list.append(st.session_state.user_id)
+                        save_data(fresh)
+                        full_rerun()
+            if can_edit:
+                with action_cols[len(REACTIONS)]:
+                    if st.button("✏️", key=f"edit_{msg_id}", help="Edit"):
+                        st.session_state.editing_msg_id = msg_id
+                        full_rerun()
             if can_delete:
-                if st.button("🗑️ delete", key=f"del_{msg_id}", help="Delete this message"):
-                    fresh = load_data()
-                    fresh["rooms"][room] = [
-                        m for m in fresh["rooms"].get(room, []) if m.get("id") != msg_id
-                    ]
-                    save_data(fresh)
-                    full_rerun()
+                with action_cols[len(REACTIONS) + 1]:
+                    if st.button("🗑️", key=f"del_{msg_id}", help="Delete"):
+                        fresh = load_data()
+                        fresh["rooms"][room] = [
+                            m for m in fresh["rooms"].get(room, []) if m.get("id") != msg_id
+                        ]
+                        save_data(fresh)
+                        full_rerun()
 
 
 render_chat()
@@ -656,6 +794,7 @@ render_chat()
 # ---------------------------------------------------------------------------
 # MESSAGE INPUT
 # ---------------------------------------------------------------------------
+st.caption("Tip: type @name to mention someone.")
 with st.form("send_form", clear_on_submit=True):
     col1, col2 = st.columns([5, 1])
     with col1:
@@ -664,16 +803,23 @@ with st.form("send_form", clear_on_submit=True):
         submitted = st.form_submit_button("Send 🚀", use_container_width=True)
 
     if submitted and text.strip():
-        fresh = load_data()
-        fresh["rooms"].setdefault(room, [])
-        fresh["rooms"][room].append({
-            "id": str(uuid.uuid4())[:10],
-            "user_id": st.session_state.user_id,
-            "name": st.session_state.username,
-            "text": text.strip(),
-            "time": datetime.now().isoformat(),
-        })
-        fresh["rooms"][room] = fresh["rooms"][room][-500:]
-        save_data(fresh)
-        st.session_state.last_read[room] = len(fresh["rooms"][room])
-        st.rerun()
+        now = datetime.now().timestamp()
+        st.session_state.send_times = [t for t in st.session_state.send_times if now - t < 2]
+        if len(st.session_state.send_times) >= 3:
+            st.warning("You're sending messages too fast — slow down a moment.")
+        else:
+            st.session_state.send_times.append(now)
+            fresh = load_data()
+            fresh["rooms"].setdefault(room, [])
+            fresh["rooms"][room].append({
+                "id": str(uuid.uuid4())[:10],
+                "user_id": st.session_state.user_id,
+                "name": st.session_state.username,
+                "text": text.strip(),
+                "time": datetime.now().isoformat(),
+                "reactions": {},
+            })
+            fresh["rooms"][room] = fresh["rooms"][room][-500:]
+            save_data(fresh)
+            st.session_state.last_read[room] = len(fresh["rooms"][room])
+            st.rerun()
