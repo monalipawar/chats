@@ -63,6 +63,15 @@ def relative_time(iso_str):
         return f"{int(diff // 3600)}h ago"
     return t.strftime("%b %d, %H:%M")
 
+
+def full_rerun():
+    """Force a full-app rerun even when called from inside a fragment.
+    Falls back gracefully on older Streamlit versions without scope support."""
+    try:
+        st.rerun(scope="app")
+    except TypeError:
+        st.rerun()
+
 # ---------------------------------------------------------------------------
 # DATA LAYER
 # ---------------------------------------------------------------------------
@@ -495,7 +504,7 @@ with st.sidebar:
                         fresh = load_data()
                         fresh["users"].pop(uid, None)
                         save_data(fresh)
-                        st.rerun()
+                        full_rerun()
             else:
                 st.caption(f"{dot} {u['name']}")
 
@@ -610,7 +619,7 @@ def render_chat():
                         m for m in fresh["rooms"].get(room, []) if m.get("id") != msg_id
                     ]
                     save_data(fresh)
-                    st.rerun()
+                    full_rerun()
 
 
 render_chat()
