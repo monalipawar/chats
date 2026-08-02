@@ -78,9 +78,21 @@ data = st.session_state.data
 # SESSION / IDENTITY
 # ---------------------------------------------------------------------------
 if "user_id" not in st.session_state:
-    st.session_state.user_id = str(uuid.uuid4())[:8]
+    qp_uid = st.query_params.get("uid")
+    st.session_state.user_id = qp_uid if qp_uid else str(uuid.uuid4())[:8]
 if "username" not in st.session_state:
-    st.session_state.username = None
+    qp_name = st.query_params.get("name")
+    if qp_name and qp_name.strip():
+        st.session_state.username = qp_name.strip()
+        # make sure this returning user is registered in the users table
+        data["users"].setdefault(st.session_state.user_id, {
+            "name": qp_name.strip(),
+            "joined": datetime.now().isoformat(),
+            "last_seen": datetime.now().isoformat(),
+        })
+        save_data(data)
+    else:
+        st.session_state.username = None
 if "current_room" not in st.session_state:
     st.session_state.current_room = "General"
 if "theme" not in st.session_state:
@@ -233,6 +245,8 @@ if not st.session_state.username:
                     "last_seen": datetime.now().isoformat(),
                 }
                 save_data(data)
+                st.query_params["uid"] = st.session_state.user_id
+                st.query_params["name"] = name.strip()
                 st.rerun()
             else:
                 st.warning("Enter a name first.")
@@ -347,6 +361,7 @@ with st.sidebar:
     auto_refresh = st.checkbox("🔄 Auto-refresh", value=True)
     if st.button("🚪 Leave chat"):
         st.session_state.username = None
+        st.query_params.clear()
         st.rerun()
 
 # ---------------------------------------------------------------------------
