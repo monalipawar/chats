@@ -81,9 +81,10 @@ def load_data():
             with open(DATA_FILE, "r") as f:
                 d = json.load(f)
         except Exception:
-            d = {"rooms": {"General": []}, "users": {}}
+            d = {"rooms": {"General": []}, "users": {}, "admin_uids": []}
     else:
-        d = {"rooms": {"General": []}, "users": {}}
+        d = {"rooms": {"General": []}, "users": {}, "admin_uids": []}
+    d.setdefault("admin_uids", [])
 
     # Backfill ids for messages saved before delete support existed,
     # otherwise their delete button has nothing to key off of.
@@ -188,8 +189,14 @@ if "last_read" not in st.session_state:
     st.session_state.last_read = {}
 if "search_query" not in st.session_state:
     st.session_state.search_query = ""
-if "is_admin" not in st.session_state:
-    st.session_state.is_admin = False
+
+
+def is_admin_user():
+    """Admin status is tied to your account (uid), stored in the shared
+    data file, so it persists across sessions/devices/tabs — not just
+    the browser tab where you happened to unlock it."""
+    live = load_data()
+    return st.session_state.get("user_id") in live.get("admin_uids", [])
 
 theme = THEMES[st.session_state.theme]
 
@@ -495,7 +502,7 @@ with st.sidebar:
             except Exception:
                 active = False
             dot = "🟢" if active else "⚪"
-            if st.session_state.is_admin:
+            if is_admin_user():
                 col_u, col_del = st.columns([5, 1])
                 with col_u:
                     st.caption(f"{dot} {u['name']}")
@@ -511,16 +518,24 @@ with st.sidebar:
     render_presence()
 
     with st.expander("🔑 Admin"):
-        if st.session_state.is_admin:
-            st.success("Admin unlocked — you can remove people.")
+        if is_admin_user():
+            st.success("Admin unlocked — you can remove people and delete anyone's messages, on any device.")
             if st.button("Lock admin"):
-                st.session_state.is_admin = False
-                st.rerun()
+                fresh = load_data()
+                fresh["admin_uids"] = [
+                    u for u in fresh.get("admin_uids", []) if u != st.session_state.user_id
+                ]
+                save_data(fresh)
+                full_rerun()
         else:
             passcode = st.text_input("Passcode", type="password", key="admin_passcode_input")
             if st.button("Unlock"):
                 if passcode == ADMIN_PASSCODE:
-                    st.session_state.is_admin = True
+                    fresh = load_data()
+                    fresh.setdefault("admin_uids", [])
+                    if st.session_state.user_id not in fresh["admin_uids"]:
+                        fresh["admin_uids"].append(st.session_state.user_id)
+                    save_data(fresh)
                     st.rerun()
                 else:
                     st.error("Wrong passcode.")
@@ -612,7 +627,7 @@ def render_chat():
                 )
             with del_col:
                 msg_id = msg.get("id")
-                can_delete = msg_id and (is_mine or st.session_state.is_admin)
+                can_delete = msg_id and (is_mine or is_admin_user())
                 if can_delete and st.button("✕", key=f"del_{msg_id}", help="Delete message"):
                     fresh = load_data()
                     fresh["rooms"][room] = [
