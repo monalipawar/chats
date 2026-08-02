@@ -332,6 +332,21 @@ section[data-testid="stSidebar"] {{ background: rgba(10, 14, 39, 0.6); backdrop-
 
 div.st-key-chat_scroll {{ padding: 8px 14px; }}
 
+div.st-key-chat_scroll button {{
+    font-size: 0.7rem !important;
+    padding: 1px 8px !important;
+    height: auto !important;
+    min-height: 0 !important;
+    color: rgba(255,255,255,0.45) !important;
+    background: transparent !important;
+    border: 1px solid rgba(255,255,255,0.15) !important;
+    margin-bottom: 8px;
+}}
+div.st-key-chat_scroll button:hover {{
+    color: #FF6B6B !important;
+    border-color: #FF6B6B66 !important;
+}}
+
 div.st-key-info_btn_wrap button {{
     border-radius: 50% !important;
     width: 42px; height: 42px;
@@ -615,20 +630,19 @@ def render_chat():
                 f'{relative_time(msg.get("time",""))}</div>'
             ) if show_meta else ""
 
-            row_col, del_col = st.columns([20, 1])
-            with row_col:
-                st.markdown(
-                    f'<div class="{row_class}">'
-                    f'<div class="avatar" style="background:{color};">{initials(msg["name"])}</div>'
-                    f'<div>{meta_html}'
-                    f'<div class="{bubble_class}">{msg["text"]}</div>'
-                    f'</div></div>',
-                    unsafe_allow_html=True,
-                )
-            with del_col:
-                msg_id = msg.get("id")
-                can_delete = msg_id and (is_mine or is_admin_user())
-                if can_delete and st.button("✕", key=f"del_{msg_id}", help="Delete message"):
+            msg_id = msg.get("id")
+            can_delete = msg_id and (is_mine or is_admin_user())
+
+            st.markdown(
+                f'<div class="{row_class}">'
+                f'<div class="avatar" style="background:{color};">{initials(msg["name"])}</div>'
+                f'<div>{meta_html}'
+                f'<div class="{bubble_class}">{msg["text"]}</div>'
+                f'</div></div>',
+                unsafe_allow_html=True,
+            )
+            if can_delete:
+                if st.button("🗑️ delete", key=f"del_{msg_id}", help="Delete this message"):
                     fresh = load_data()
                     fresh["rooms"][room] = [
                         m for m in fresh["rooms"].get(room, []) if m.get("id") != msg_id
