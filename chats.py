@@ -14,6 +14,11 @@ st.set_page_config(page_title="NebulaChat", page_icon="💬", layout="wide")
 DATA_FILE = "nebulachat_data.json"
 REFRESH_INTERVAL = 3  # seconds
 
+# Change this to whatever you like — whoever enters it in the sidebar
+# gets permission to remove people from "Who's around". Everyone can
+# already delete individual messages; only the admin can remove users.
+ADMIN_PASSCODE = "nebula-admin"
+
 THEMES = {
     "Default": {"primary": "#7B61FF", "secondary": "#00D9FF", "bg1": "#0A0E27", "bg2": "#1A1E3F"},
     "Cyberpunk": {"primary": "#FF2E63", "secondary": "#00FFF5", "bg1": "#0D0221", "bg2": "#241734"},
@@ -127,6 +132,8 @@ if "last_read" not in st.session_state:
     st.session_state.last_read = {}
 if "search_query" not in st.session_state:
     st.session_state.search_query = ""
+if "is_admin" not in st.session_state:
+    st.session_state.is_admin = False
 
 theme = THEMES[st.session_state.theme]
 
@@ -383,14 +390,41 @@ with st.sidebar:
     st.divider()
     st.subheader("Who's around")
     now = datetime.now()
-    for uid, u in data.get("users", {}).items():
+    for uid, u in list(data.get("users", {}).items()):
         try:
             last_seen = datetime.fromisoformat(u["last_seen"])
             active = (now - last_seen).total_seconds() < 30
         except Exception:
             active = False
         dot = "🟢" if active else "⚪"
-        st.caption(f"{dot} {u['name']}")
+        if st.session_state.is_admin:
+            col_u, col_del = st.columns([5, 1])
+            with col_u:
+                st.caption(f"{dot} {u['name']}")
+            with col_del:
+                if st.button("🗑️", key=f"deluser_{uid}", help=f"Remove {u['name']}"):
+                    fresh = load_data()
+                    fresh["users"].pop(uid, None)
+                    save_data(fresh)
+                    st.session_state.data = fresh
+                    st.rerun()
+        else:
+            st.caption(f"{dot} {u['name']}")
+
+    with st.expander("🔑 Admin"):
+        if st.session_state.is_admin:
+            st.success("Admin unlocked — you can remove people.")
+            if st.button("Lock admin"):
+                st.session_state.is_admin = False
+                st.rerun()
+        else:
+            passcode = st.text_input("Passcode", type="password", key="admin_passcode_input")
+            if st.button("Unlock"):
+                if passcode == ADMIN_PASSCODE:
+                    st.session_state.is_admin = True
+                    st.rerun()
+                else:
+                    st.error("Wrong passcode.")
 
     st.divider()
     auto_refresh = st.checkbox("🔄 Auto-refresh", value=True)
@@ -444,6 +478,8 @@ st.session_state.search_query = st.text_input(
 def render_chat():
     live_data = load_data()
     msgs = live_data["rooms"].get(room, [])
+    # WhatsApp-style strict chronological order, oldest first
+    msgs = sorted(msgs, key=lambda m: m.get("time", ""))
     query = st.session_state.search_query.strip().lower()
     if query:
         msgs = [m for m in msgs if query in m["text"].lower()]
@@ -466,14 +502,26 @@ def render_chat():
                 f'{relative_time(msg.get("time",""))}</div>'
             ) if show_meta else ""
 
-            st.markdown(
-                f'<div class="{row_class}">'
-                f'<div class="avatar" style="background:{color};">{initials(msg["name"])}</div>'
-                f'<div>{meta_html}'
-                f'<div class="{bubble_class}">{msg["text"]}</div>'
-                f'</div></div>',
-                unsafe_allow_html=True,
-            )
+            row_col, del_col = st.columns([20, 1])
+            with row_col:
+                st.markdown(
+                    f'<div class="{row_class}">'
+                    f'<div class="avatar" style="background:{color};">{initials(msg["name"])}</div>'
+                    f'<div>{meta_html}'
+                    f'<div class="{bubble_class}">{msg["text"]}</div>'
+                    f'</div></div>',
+                    unsafe_allow_html=True,
+                )
+            with del_col:
+                msg_id = msg.get("id")
+                if msg_id and st.button("✕", key=f"del_{msg_id}", help="Delete message"):
+                    fresh = load_data()
+                    fresh["rooms"][room] = [
+                        m for m in fresh["rooms"].get(room, []) if m.get("id") != msg_id
+                    ]
+                    save_data(fresh)
+                    st.session_state.data = fresh
+                    st.rerun()
 
 
 render_chat()
@@ -492,6 +540,7 @@ with st.form("send_form", clear_on_submit=True):
         fresh = load_data()
         fresh["rooms"].setdefault(room, [])
         fresh["rooms"][room].append({
+            "id": str(uuid.uuid4())[:10],
             "user_id": st.session_state.user_id,
             "name": st.session_state.username,
             "text": text.strip(),
