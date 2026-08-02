@@ -84,6 +84,35 @@ def load_data():
             if "id" not in m or not m["id"]:
                 m["id"] = str(uuid.uuid4())[:10]
                 dirty = True
+    # Merge any duplicate accounts that share the same display name
+    # (leftover from before same-name accounts were reused automatically).
+    # Keep the earliest-joined uid per name, remap that name's messages
+    # to it, and drop the extra user entries.
+    by_name = {}
+    for uid, u in d.get("users", {}).items():
+        key = u.get("name", "").strip().lower()
+        by_name.setdefault(key, []).append((uid, u))
+
+    uid_remap = {}
+    for key, entries in by_name.items():
+        if len(entries) <= 1:
+            continue
+        entries.sort(key=lambda e: e[1].get("joined", ""))
+        canonical_uid, canonical_user = entries[0]
+        for uid, u in entries[1:]:
+            uid_remap[uid] = canonical_uid
+            last_seen_u = u.get("last_seen", "")
+            if last_seen_u > canonical_user.get("last_seen", ""):
+                canonical_user["last_seen"] = last_seen_u
+            d["users"].pop(uid, None)
+        dirty = True
+
+    if uid_remap:
+        for room_msgs in d.get("rooms", {}).values():
+            for m in room_msgs:
+                if m.get("user_id") in uid_remap:
+                    m["user_id"] = uid_remap[m["user_id"]]
+
     if dirty:
         with open(DATA_FILE, "w") as f:
             json.dump(d, f, indent=2)
@@ -291,21 +320,38 @@ if not st.session_state.username:
         st.markdown('<div class="glass-card">', unsafe_allow_html=True)
         name = st.text_input("Pick a display name to join the chat", max_chars=20)
         if st.button("🚀 Enter NebulaChat", use_container_width=True):
-            if name.strip():
-                st.session_state.username = name.strip()
-                data["users"][st.session_state.user_id] = {
-                    "name": name.strip(),
-                    "joined": datetime.now().isoformat(),
-                    "last_seen": datetime.now().isoformat(),
-                }
-                save_data(data)
+            entered_name = name.strip()
+            if entered_name:
+                fresh = load_data()
+
+                # If this name already belongs to someone, reuse that
+                # account instead of creating a new one.
+                existing_uid = None
+                for uid, u in fresh["users"].items():
+                    if u.get("name", "").strip().lower() == entered_name.lower():
+                        existing_uid = uid
+                        break
+
+                if existing_uid:
+                    st.session_state.user_id = existing_uid
+                    fresh["users"][existing_uid]["last_seen"] = datetime.now().isoformat()
+                else:
+                    fresh["users"][st.session_state.user_id] = {
+                        "name": entered_name,
+                        "joined": datetime.now().isoformat(),
+                        "last_seen": datetime.now().isoformat(),
+                    }
+
+                st.session_state.username = entered_name
+                save_data(fresh)
+                st.session_state.data = fresh
                 st.query_params["uid"] = st.session_state.user_id
-                st.query_params["name"] = name.strip()
+                st.query_params["name"] = entered_name
                 components.html(
                     f"""
                     <script>
                     window.parent.localStorage.setItem('nebulachat_uid', {json.dumps(st.session_state.user_id)});
-                    window.parent.localStorage.setItem('nebulachat_name', {json.dumps(name.strip())});
+                    window.parent.localStorage.setItem('nebulachat_name', {json.dumps(entered_name)});
                     </script>
                     """,
                     height=0,
