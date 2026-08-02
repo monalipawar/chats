@@ -1,4 +1,5 @@
 import streamlit as st
+import streamlit.components.v1 as components
 import json
 import os
 import uuid
@@ -77,6 +78,9 @@ data = st.session_state.data
 # ---------------------------------------------------------------------------
 # SESSION / IDENTITY
 # ---------------------------------------------------------------------------
+if "identity_checked" not in st.session_state:
+    st.session_state.identity_checked = False
+
 if "user_id" not in st.session_state:
     qp_uid = st.query_params.get("uid")
     st.session_state.user_id = qp_uid if qp_uid else str(uuid.uuid4())[:8]
@@ -84,7 +88,6 @@ if "username" not in st.session_state:
     qp_name = st.query_params.get("name")
     if qp_name and qp_name.strip():
         st.session_state.username = qp_name.strip()
-        # make sure this returning user is registered in the users table
         data["users"].setdefault(st.session_state.user_id, {
             "name": qp_name.strip(),
             "joined": datetime.now().isoformat(),
@@ -93,6 +96,29 @@ if "username" not in st.session_state:
         save_data(data)
     else:
         st.session_state.username = None
+
+# If we still don't have an identity, try bouncing through localStorage once.
+# This makes identity persist across visits even without the uid/name query
+# params in the URL (e.g. opening the app fresh from the launcher).
+if not st.session_state.username and not st.session_state.identity_checked:
+    st.session_state.identity_checked = True
+    components.html(
+        """
+        <script>
+        const params = new URLSearchParams(window.parent.location.search);
+        if (!params.get('uid')) {
+            const uid = window.parent.localStorage.getItem('nebulachat_uid');
+            const name = window.parent.localStorage.getItem('nebulachat_name');
+            if (uid && name) {
+                params.set('uid', uid);
+                params.set('name', name);
+                window.parent.location.search = params.toString();
+            }
+        }
+        </script>
+        """,
+        height=0,
+    )
 if "current_room" not in st.session_state:
     st.session_state.current_room = "General"
 if "theme" not in st.session_state:
@@ -247,6 +273,15 @@ if not st.session_state.username:
                 save_data(data)
                 st.query_params["uid"] = st.session_state.user_id
                 st.query_params["name"] = name.strip()
+                components.html(
+                    f"""
+                    <script>
+                    window.parent.localStorage.setItem('nebulachat_uid', {json.dumps(st.session_state.user_id)});
+                    window.parent.localStorage.setItem('nebulachat_name', {json.dumps(name.strip())});
+                    </script>
+                    """,
+                    height=0,
+                )
                 st.rerun()
             else:
                 st.warning("Enter a name first.")
@@ -361,7 +396,17 @@ with st.sidebar:
     auto_refresh = st.checkbox("🔄 Auto-refresh", value=True)
     if st.button("🚪 Leave chat"):
         st.session_state.username = None
+        st.session_state.identity_checked = False
         st.query_params.clear()
+        components.html(
+            """
+            <script>
+            window.parent.localStorage.removeItem('nebulachat_uid');
+            window.parent.localStorage.removeItem('nebulachat_name');
+            </script>
+            """,
+            height=0,
+        )
         st.rerun()
 
 # ---------------------------------------------------------------------------
