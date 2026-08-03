@@ -23,10 +23,20 @@ REFRESH_INTERVAL = 3  # seconds
 # Set in Streamlit Cloud under Settings -> Secrets as:
 #   ADMIN_PASSCODE = "your-secret-here"
 # Falls back to a default only if no secret is configured (e.g. local dev).
+# High-level admin: everything (delete anyone's messages/users/rooms).
+# Low-level admin: can ONLY see and use rooms marked "admin only" — no
+# access to regular public rooms, and no delete powers elsewhere.
+# Set both in Streamlit Cloud under Settings -> Secrets:
+#   ADMIN_PASSCODE = "your-high-level-secret"
+#   LOW_ADMIN_PASSCODE = "your-low-level-secret"
 try:
     ADMIN_PASSCODE = st.secrets["ADMIN_PASSCODE"]
 except Exception:
     ADMIN_PASSCODE = "nebula-admin"
+try:
+    LOW_ADMIN_PASSCODE = st.secrets["LOW_ADMIN_PASSCODE"]
+except Exception:
+    LOW_ADMIN_PASSCODE = "nebula-lowadmin"
 
 THEMES = {
     "Default": {"primary": "#7B61FF", "secondary": "#00D9FF", "bg1": "#0A0E27", "bg2": "#1A1E3F"},
@@ -125,10 +135,11 @@ def load_data():
             with open(DATA_FILE, "r") as f:
                 d = json.load(f)
         except Exception:
-            d = {"rooms": {"General": []}, "users": {}, "admin_uids": []}
+            d = {"rooms": {"General": []}, "users": {}, "admin_uids": [], "low_admin_uids": []}
     else:
-        d = {"rooms": {"General": []}, "users": {}, "admin_uids": []}
+        d = {"rooms": {"General": []}, "users": {}, "admin_uids": [], "low_admin_uids": []}
     d.setdefault("admin_uids", [])
+    d.setdefault("low_admin_uids", [])
 
     # Backfill ids for messages saved before delete support existed,
     # otherwise their delete button has nothing to key off of.
@@ -249,6 +260,19 @@ def is_admin_user():
     the browser tab where you happened to unlock it."""
     live = load_data()
     return st.session_state.get("user_id") in live.get("admin_uids", [])
+
+
+def is_low_admin_user():
+    """Low-level admin: access to admin-only rooms, nothing else special.
+    High-level admins are NOT automatically low-level admins in this
+    check — use is_low_admin_user() or is_admin_user() together when you
+    mean 'anyone with admin-room access'."""
+    live = load_data()
+    return st.session_state.get("user_id") in live.get("low_admin_uids", [])
+
+
+def can_access_admin_rooms():
+    return is_admin_user() or is_low_admin_user()
 
 theme = THEMES[st.session_state.theme]
 
@@ -496,8 +520,20 @@ if not st.session_state.username:
 @st.dialog("🕐 Recent Activity", width="large")
 def show_recent_activity():
     live_data = load_data()
+    live_data.setdefault("room_meta", {})
+    high = is_admin_user()
+    low = is_low_admin_user()
     all_msgs = []
     for room_name, msgs in live_data["rooms"].items():
+        if is_dm_key(room_name):
+            if st.session_state.user_id not in room_name:
+                continue  # never leak someone else's DMs
+        else:
+            room_admin_only = live_data["room_meta"].get(room_name, {}).get("admin_only", False)
+            if room_admin_only and not (high or low):
+                continue
+            if not room_admin_only and low and not high:
+                continue  # low-level admins only see admin rooms
         for m in msgs:
             all_msgs.append({**m, "room": room_name})
     all_msgs.sort(key=lambda m: m.get("time", ""), reverse=True)
@@ -542,10 +578,20 @@ def show_global_search():
         return
 
     q = query.strip().lower()
+    live_data.setdefault("room_meta", {})
+    high = is_admin_user()
+    low = is_low_admin_user()
     results = []
     for room_name, msgs in live_data["rooms"].items():
-        if is_dm_key(room_name) and st.session_state.user_id not in room_name:
-            continue  # don't leak other people's DMs into global search
+        if is_dm_key(room_name):
+            if st.session_state.user_id not in room_name:
+                continue  # don't leak other people's DMs into global search
+        else:
+            room_admin_only = live_data["room_meta"].get(room_name, {}).get("admin_only", False)
+            if room_admin_only and not (high or low):
+                continue
+            if not room_admin_only and low and not high:
+                continue
         for m in msgs:
             if q in m["text"].lower():
                 results.append({**m, "room": room_name})
@@ -610,13 +656,26 @@ with st.sidebar:
 
     st.divider()
     st.subheader("Rooms")
-    room_names = [r for r in data["rooms"].keys() if not is_dm_key(r)]
+    data.setdefault("room_meta", {})
+    all_room_names = [r for r in data["rooms"].keys() if not is_dm_key(r)]
+
+    def _is_admin_only(rname):
+        return data["room_meta"].get(rname, {}).get("admin_only", False)
+
+    if is_admin_user():
+        room_names = all_room_names  # high-level admin sees everything
+    elif is_low_admin_user():
+        room_names = [r for r in all_room_names if _is_admin_only(r)]  # admin rooms only
+    else:
+        room_names = [r for r in all_room_names if not _is_admin_only(r)]
+
     for r in room_names:
         msgs = data["rooms"][r]
         seen = st.session_state.last_read.get(r, 0)
         unread = max(0, len(msgs) - seen)
         active = (r == st.session_state.current_room)
-        label = f"{'▶ ' if active else ''}# {r}"
+        lock = "🔒 " if _is_admin_only(r) else ""
+        label = f"{'▶ ' if active else ''}{lock}# {r}"
         if is_admin_user() and len(room_names) > 1:
             col_a, col_b, col_c = st.columns([4, 1, 1])
         else:
@@ -641,16 +700,22 @@ with st.sidebar:
                         st.session_state.current_room = next(iter(fresh["rooms"]), "General")
                     full_rerun()
 
-    with st.expander("➕ New room"):
-        new_room = st.text_input("Room name", key="new_room_input")
-        if st.button("Create room"):
-            if new_room.strip() and new_room.strip() not in data["rooms"]:
-                data["rooms"][new_room.strip()] = []
-                save_data(data)
-                st.session_state.current_room = new_room.strip()
-                st.rerun()
-            elif new_room.strip() in data["rooms"]:
-                st.warning("Room already exists.")
+    if not is_low_admin_user() or is_admin_user():
+        with st.expander("➕ New room"):
+            new_room = st.text_input("Room name", key="new_room_input")
+            make_admin_only = False
+            if is_admin_user():
+                make_admin_only = st.checkbox("🔒 Admin-only room", key="new_room_admin_only")
+            if st.button("Create room"):
+                if new_room.strip() and new_room.strip() not in data["rooms"]:
+                    data["rooms"][new_room.strip()] = []
+                    if make_admin_only:
+                        data["room_meta"].setdefault(new_room.strip(), {})["admin_only"] = True
+                    save_data(data)
+                    st.session_state.current_room = new_room.strip()
+                    st.rerun()
+                elif new_room.strip() in data["rooms"]:
+                    st.warning("Room already exists.")
 
     st.divider()
     st.subheader("Direct Messages")
@@ -714,7 +779,7 @@ with st.sidebar:
 
     with st.expander("🔑 Admin"):
         if is_admin_user():
-            st.success("Admin unlocked — you can remove people and delete anyone's messages, on any device.")
+            st.success("High-level admin unlocked — full access: remove people, delete anyone's messages/rooms, create admin-only rooms.")
             if st.button("Lock admin"):
                 fresh = load_data()
                 fresh["admin_uids"] = [
@@ -722,14 +787,29 @@ with st.sidebar:
                 ]
                 save_data(fresh)
                 full_rerun()
+        elif is_low_admin_user():
+            st.info("Low-level admin unlocked — you can only see and use admin-only rooms.")
+            if st.button("Lock admin"):
+                fresh = load_data()
+                fresh["low_admin_uids"] = [
+                    u for u in fresh.get("low_admin_uids", []) if u != st.session_state.user_id
+                ]
+                save_data(fresh)
+                full_rerun()
         else:
             passcode = st.text_input("Passcode", type="password", key="admin_passcode_input")
             if st.button("Unlock"):
+                fresh = load_data()
                 if passcode == ADMIN_PASSCODE:
-                    fresh = load_data()
                     fresh.setdefault("admin_uids", [])
                     if st.session_state.user_id not in fresh["admin_uids"]:
                         fresh["admin_uids"].append(st.session_state.user_id)
+                    save_data(fresh)
+                    st.rerun()
+                elif passcode == LOW_ADMIN_PASSCODE:
+                    fresh.setdefault("low_admin_uids", [])
+                    if st.session_state.user_id not in fresh["low_admin_uids"]:
+                        fresh["low_admin_uids"].append(st.session_state.user_id)
                     save_data(fresh)
                     st.rerun()
                 else:
@@ -743,6 +823,11 @@ with st.sidebar:
         for room_name, msgs in data["rooms"].items():
             if is_dm_key(room_name):
                 continue  # keep private threads out of the bulk export
+            room_admin_only = data.get("room_meta", {}).get(room_name, {}).get("admin_only", False)
+            if room_admin_only and not (is_admin_user() or is_low_admin_user()):
+                continue
+            if not room_admin_only and is_low_admin_user() and not is_admin_user():
+                continue
             lines = [
                 f"[{m.get('time','')}] {m['name']}: {m['text']}"
                 for m in sorted(msgs, key=lambda x: x.get("time", ""))
@@ -751,7 +836,7 @@ with st.sidebar:
     st.download_button(
         "⬇️ Export all rooms (.zip)", data=zip_buf.getvalue(),
         file_name="nebulachat_export.zip", mime="application/zip",
-        use_container_width=True, help="Every public room, one .txt each. Private DMs are not included.",
+        use_container_width=True, help="Every room you have access to, one .txt each. Private DMs are not included.",
     )
 
     if "notifications_on" not in st.session_state:
@@ -816,7 +901,34 @@ else:
     room = st.session_state.current_room
     if room not in data["rooms"] or is_dm_key(room):
         room = "General"
-        st.session_state.current_room = room
+
+    data.setdefault("room_meta", {})
+    room_is_admin_only = data["room_meta"].get(room, {}).get("admin_only", False)
+    high = is_admin_user()
+    low = is_low_admin_user()
+
+    if room_is_admin_only and not (high or low):
+        # Regular user somehow pointed at an admin room — bounce to a
+        # normal room instead of showing restricted content.
+        fallback = next(
+            (r for r in data["rooms"] if not is_dm_key(r)
+             and not data["room_meta"].get(r, {}).get("admin_only", False)),
+            "General",
+        )
+        room = fallback
+    elif low and not high and not room_is_admin_only:
+        # Low-level admin: restricted to admin-only rooms exclusively.
+        admin_rooms = [
+            r for r in data["rooms"] if not is_dm_key(r)
+            and data["room_meta"].get(r, {}).get("admin_only", False)
+        ]
+        if admin_rooms:
+            room = admin_rooms[0]
+        else:
+            st.warning("No admin-only rooms exist yet. Ask a high-level admin to create one.")
+            st.stop()
+
+    st.session_state.current_room = room
     display_title = f"# {room}"
 
 st.session_state.last_read[room] = len(data["rooms"][room])
@@ -826,10 +938,13 @@ topic = data["room_meta"].get(room, {}).get("topic", "") if not is_dm_mode else 
 
 header_l, header_r = st.columns([6, 1])
 with header_l:
-    st.markdown(f'<p class="chat-title">{display_title}</p>', unsafe_allow_html=True)
+    title_prefix = "🔒 " if (not is_dm_mode and data["room_meta"].get(room, {}).get("admin_only", False)) else ""
+    st.markdown(f'<p class="chat-title">{title_prefix}{display_title}</p>', unsafe_allow_html=True)
     sub = f"{len(data['rooms'][room])} messages"
     if is_dm_mode:
         sub += " · private thread"
+    elif data["room_meta"].get(room, {}).get("admin_only", False):
+        sub += " · admin-only room"
     elif topic:
         sub += f" · {topic}"
     st.markdown(f'<p class="chat-sub">{sub}</p>', unsafe_allow_html=True)
