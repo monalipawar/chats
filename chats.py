@@ -23,16 +23,23 @@ REFRESH_INTERVAL = 3  # seconds
 # Set in Streamlit Cloud under Settings -> Secrets as:
 #   ADMIN_PASSCODE = "your-secret-here"
 # Falls back to a default only if no secret is configured (e.g. local dev).
-# High-level admin: everything (delete anyone's messages/users/rooms).
-# Low-level admin: can ONLY see and use rooms marked "admin only" — no
-# access to regular public rooms, and no delete powers elsewhere.
-# Set both in Streamlit Cloud under Settings -> Secrets:
+# Three admin tiers:
+#   High level   — everything: delete anyone's messages/users/rooms, create
+#                  admin-only rooms, unrestricted room access.
+#   Medium level — can enter admin-only rooms AND remove people.
+#   Low level    — can ONLY remove people (no admin-room access).
+# Set in Streamlit Cloud under Settings -> Secrets:
 #   ADMIN_PASSCODE = "your-high-level-secret"
+#   MEDIUM_ADMIN_PASSCODE = "your-medium-level-secret"
 #   LOW_ADMIN_PASSCODE = "your-low-level-secret"
 try:
     ADMIN_PASSCODE = st.secrets["ADMIN_PASSCODE"]
 except Exception:
     ADMIN_PASSCODE = "nebula-admin"
+try:
+    MEDIUM_ADMIN_PASSCODE = st.secrets["MEDIUM_ADMIN_PASSCODE"]
+except Exception:
+    MEDIUM_ADMIN_PASSCODE = "nebula-mediumadmin"
 try:
     LOW_ADMIN_PASSCODE = st.secrets["LOW_ADMIN_PASSCODE"]
 except Exception:
@@ -135,10 +142,11 @@ def load_data():
             with open(DATA_FILE, "r") as f:
                 d = json.load(f)
         except Exception:
-            d = {"rooms": {"General": []}, "users": {}, "admin_uids": [], "low_admin_uids": []}
+            d = {"rooms": {"General": []}, "users": {}, "admin_uids": [], "medium_admin_uids": [], "low_admin_uids": []}
     else:
-        d = {"rooms": {"General": []}, "users": {}, "admin_uids": [], "low_admin_uids": []}
+        d = {"rooms": {"General": []}, "users": {}, "admin_uids": [], "medium_admin_uids": [], "low_admin_uids": []}
     d.setdefault("admin_uids", [])
+    d.setdefault("medium_admin_uids", [])
     d.setdefault("low_admin_uids", [])
 
     # Backfill ids for messages saved before delete support existed,
@@ -262,17 +270,26 @@ def is_admin_user():
     return st.session_state.get("user_id") in live.get("admin_uids", [])
 
 
+def is_medium_admin_user():
+    """Medium-level admin: can enter admin-only rooms and remove people.
+    Does NOT get message-delete-anyone or room-delete powers."""
+    live = load_data()
+    return st.session_state.get("user_id") in live.get("medium_admin_uids", [])
+
+
 def is_low_admin_user():
-    """Low-level admin: access to admin-only rooms, nothing else special.
-    High-level admins are NOT automatically low-level admins in this
-    check — use is_low_admin_user() or is_admin_user() together when you
-    mean 'anyone with admin-room access'."""
+    """Low-level admin: can ONLY remove people. No admin-room access,
+    no other special powers."""
     live = load_data()
     return st.session_state.get("user_id") in live.get("low_admin_uids", [])
 
 
 def can_access_admin_rooms():
-    return is_admin_user() or is_low_admin_user()
+    return is_admin_user() or is_medium_admin_user()
+
+
+def can_remove_people():
+    return is_admin_user() or is_medium_admin_user() or is_low_admin_user()
 
 theme = THEMES[st.session_state.theme]
 
@@ -522,7 +539,7 @@ def show_recent_activity():
     live_data = load_data()
     live_data.setdefault("room_meta", {})
     high = is_admin_user()
-    low = is_low_admin_user()
+    medium = is_medium_admin_user()
     all_msgs = []
     for room_name, msgs in live_data["rooms"].items():
         if is_dm_key(room_name):
@@ -530,10 +547,10 @@ def show_recent_activity():
                 continue  # never leak someone else's DMs
         else:
             room_admin_only = live_data["room_meta"].get(room_name, {}).get("admin_only", False)
-            if room_admin_only and not (high or low):
+            if room_admin_only and not (high or medium):
                 continue
-            if not room_admin_only and low and not high:
-                continue  # low-level admins only see admin rooms
+            if not room_admin_only and medium and not high:
+                continue  # medium-level admins only see admin rooms
         for m in msgs:
             all_msgs.append({**m, "room": room_name})
     all_msgs.sort(key=lambda m: m.get("time", ""), reverse=True)
@@ -580,7 +597,7 @@ def show_global_search():
     q = query.strip().lower()
     live_data.setdefault("room_meta", {})
     high = is_admin_user()
-    low = is_low_admin_user()
+    medium = is_medium_admin_user()
     results = []
     for room_name, msgs in live_data["rooms"].items():
         if is_dm_key(room_name):
@@ -588,9 +605,9 @@ def show_global_search():
                 continue  # don't leak other people's DMs into global search
         else:
             room_admin_only = live_data["room_meta"].get(room_name, {}).get("admin_only", False)
-            if room_admin_only and not (high or low):
+            if room_admin_only and not (high or medium):
                 continue
-            if not room_admin_only and low and not high:
+            if not room_admin_only and medium and not high:
                 continue
         for m in msgs:
             if q in m["text"].lower():
@@ -664,7 +681,7 @@ with st.sidebar:
 
     if is_admin_user():
         room_names = all_room_names  # high-level admin sees everything
-    elif is_low_admin_user():
+    elif is_medium_admin_user():
         room_names = [r for r in all_room_names if _is_admin_only(r)]  # admin rooms only
     else:
         room_names = [r for r in all_room_names if not _is_admin_only(r)]
@@ -700,7 +717,7 @@ with st.sidebar:
                         st.session_state.current_room = next(iter(fresh["rooms"]), "General")
                     full_rerun()
 
-    if not is_low_admin_user() or is_admin_user():
+    if not is_medium_admin_user() or is_admin_user():
         with st.expander("➕ New room"):
             new_room = st.text_input("Room name", key="new_room_input")
             make_admin_only = False
@@ -762,7 +779,7 @@ with st.sidebar:
             except Exception:
                 active = False
             dot = "🟢" if active else "⚪"
-            if is_admin_user():
+            if can_remove_people():
                 col_u, col_del = st.columns([5, 1])
                 with col_u:
                     st.caption(f"{dot} {u['name']}")
@@ -787,8 +804,17 @@ with st.sidebar:
                 ]
                 save_data(fresh)
                 full_rerun()
+        elif is_medium_admin_user():
+            st.info("Medium-level admin unlocked — you can enter admin-only rooms and remove people.")
+            if st.button("Lock admin"):
+                fresh = load_data()
+                fresh["medium_admin_uids"] = [
+                    u for u in fresh.get("medium_admin_uids", []) if u != st.session_state.user_id
+                ]
+                save_data(fresh)
+                full_rerun()
         elif is_low_admin_user():
-            st.info("Low-level admin unlocked — you can only see and use admin-only rooms.")
+            st.info("Low-level admin unlocked — you can remove people. No admin-room access.")
             if st.button("Lock admin"):
                 fresh = load_data()
                 fresh["low_admin_uids"] = [
@@ -804,6 +830,12 @@ with st.sidebar:
                     fresh.setdefault("admin_uids", [])
                     if st.session_state.user_id not in fresh["admin_uids"]:
                         fresh["admin_uids"].append(st.session_state.user_id)
+                    save_data(fresh)
+                    st.rerun()
+                elif passcode == MEDIUM_ADMIN_PASSCODE:
+                    fresh.setdefault("medium_admin_uids", [])
+                    if st.session_state.user_id not in fresh["medium_admin_uids"]:
+                        fresh["medium_admin_uids"].append(st.session_state.user_id)
                     save_data(fresh)
                     st.rerun()
                 elif passcode == LOW_ADMIN_PASSCODE:
@@ -824,9 +856,9 @@ with st.sidebar:
             if is_dm_key(room_name):
                 continue  # keep private threads out of the bulk export
             room_admin_only = data.get("room_meta", {}).get(room_name, {}).get("admin_only", False)
-            if room_admin_only and not (is_admin_user() or is_low_admin_user()):
+            if room_admin_only and not (is_admin_user() or is_medium_admin_user()):
                 continue
-            if not room_admin_only and is_low_admin_user() and not is_admin_user():
+            if not room_admin_only and is_medium_admin_user() and not is_admin_user():
                 continue
             lines = [
                 f"[{m.get('time','')}] {m['name']}: {m['text']}"
@@ -905,19 +937,19 @@ else:
     data.setdefault("room_meta", {})
     room_is_admin_only = data["room_meta"].get(room, {}).get("admin_only", False)
     high = is_admin_user()
-    low = is_low_admin_user()
+    medium = is_medium_admin_user()
 
-    if room_is_admin_only and not (high or low):
-        # Regular user somehow pointed at an admin room — bounce to a
-        # normal room instead of showing restricted content.
+    if room_is_admin_only and not (high or medium):
+        # Regular/low-level user somehow pointed at an admin room — bounce
+        # to a normal room instead of showing restricted content.
         fallback = next(
             (r for r in data["rooms"] if not is_dm_key(r)
              and not data["room_meta"].get(r, {}).get("admin_only", False)),
             "General",
         )
         room = fallback
-    elif low and not high and not room_is_admin_only:
-        # Low-level admin: restricted to admin-only rooms exclusively.
+    elif medium and not high and not room_is_admin_only:
+        # Medium-level admin: restricted to admin-only rooms exclusively.
         admin_rooms = [
             r for r in data["rooms"] if not is_dm_key(r)
             and data["room_meta"].get(r, {}).get("admin_only", False)
