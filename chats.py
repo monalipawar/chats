@@ -73,7 +73,7 @@ def full_rerun():
         st.rerun()
 
 
-REACTIONS = ["👍", "❤️", "😂", "🎉", "😮"]
+REACTIONS = ["👍", "❤️", "😂", "🎉"]
 
 
 def highlight_mentions(text, known_names):
