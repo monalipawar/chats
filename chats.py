@@ -636,6 +636,28 @@ with st.sidebar:
 
     st.divider()
     auto_refresh = st.checkbox("🔄 Auto-refresh", value=True)
+
+    if "notifications_on" not in st.session_state:
+        st.session_state.notifications_on = False
+    notif_col1, notif_col2 = st.columns([3, 2])
+    with notif_col1:
+        st.session_state.notifications_on = st.checkbox(
+            "🔔 Notifications", value=st.session_state.notifications_on
+        )
+    with notif_col2:
+        sound_on = st.checkbox("🔊 Sound", value=True, key="sound_on")
+
+    if st.session_state.notifications_on:
+        components.html(
+            """
+            <script>
+            if (window.parent.Notification && window.parent.Notification.permission === "default") {
+                window.parent.Notification.requestPermission();
+            }
+            </script>
+            """,
+            height=0,
+        )
     if st.button("🚪 Leave chat"):
         st.session_state.username = None
         st.session_state.identity_checked = False
@@ -688,6 +710,82 @@ def render_chat():
     known_names = [u.get("name", "") for u in live_data.get("users", {}).values()]
     # WhatsApp-style strict chronological order, oldest first
     msgs = sorted(msgs, key=lambda m: m.get("time", ""))
+
+    if st.session_state.get("notifications_on"):
+        last_msg = msgs[-1] if msgs else None
+        if last_msg and last_msg.get("user_id") != st.session_state.user_id:
+            safe_name = json.dumps(last_msg["name"])
+            safe_text = json.dumps(last_msg["text"][:120])
+            safe_room = json.dumps(room)
+            safe_id = json.dumps(last_msg.get("id", ""))
+            play_sound = "true" if st.session_state.get("sound_on", True) else "false"
+            components.html(
+                f"""
+                <script>
+                (function() {{
+                    const w = window.parent;
+                    const lastNotifiedKey = 'nebula_last_notified_id';
+                    const lastId = w.localStorage.getItem(lastNotifiedKey);
+                    const thisId = {safe_id};
+                    if (lastId === thisId) {{ return; }}
+                    w.localStorage.setItem(lastNotifiedKey, thisId);
+
+                    // Notification bubble (foreground/backgrounded tab only —
+                    // this cannot fire if the browser itself is fully closed)
+                    if (w.Notification && w.Notification.permission === "granted" && w.document.hidden) {{
+                        try {{
+                            new w.Notification("💬 " + {safe_name} + " in #" + {safe_room}, {{
+                                body: {safe_text}
+                            }});
+                        }} catch (e) {{}}
+                    }}
+
+                    // Flash the tab title if backgrounded
+                    if (w.document.hidden) {{
+                        if (!w._nebulaOriginalTitle) {{
+                            w._nebulaOriginalTitle = w.document.title;
+                        }}
+                        let flashes = 0;
+                        if (w._nebulaFlashTimer) {{ w.clearInterval(w._nebulaFlashTimer); }}
+                        w._nebulaFlashTimer = w.setInterval(function() {{
+                            w.document.title = (w.document.title === w._nebulaOriginalTitle)
+                                ? "💬 New message!" : w._nebulaOriginalTitle;
+                            flashes++;
+                            if (!w.document.hidden || flashes > 6) {{
+                                w.clearInterval(w._nebulaFlashTimer);
+                                w.document.title = w._nebulaOriginalTitle;
+                            }}
+                        }}, 1000);
+                        w.document.addEventListener('visibilitychange', function onVis() {{
+                            if (!w.document.hidden) {{
+                                w.clearInterval(w._nebulaFlashTimer);
+                                w.document.title = w._nebulaOriginalTitle;
+                                w.document.removeEventListener('visibilitychange', onVis);
+                            }}
+                        }});
+                    }}
+
+                    // Sound ping (plays regardless of focus, as long as tab is open)
+                    if ({play_sound}) {{
+                        try {{
+                            const ctx = new (w.AudioContext || w.webkitAudioContext)();
+                            const osc = ctx.createOscillator();
+                            const gain = ctx.createGain();
+                            osc.connect(gain);
+                            gain.connect(ctx.destination);
+                            osc.frequency.value = 880;
+                            gain.gain.setValueAtTime(0.15, ctx.currentTime);
+                            gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.4);
+                            osc.start();
+                            osc.stop(ctx.currentTime + 0.4);
+                        }} catch (e) {{}}
+                    }}
+                }})();
+                </script>
+                """,
+                height=0,
+            )
+
     query = st.session_state.search_query.strip().lower()
     if query:
         msgs = [m for m in msgs if query in m["text"].lower()]
