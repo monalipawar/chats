@@ -4,6 +4,9 @@ import json
 import os
 import uuid
 import hashlib
+import io
+import zipfile
+import random
 from datetime import datetime
 
 # ---------------------------------------------------------------------------
@@ -74,6 +77,16 @@ def full_rerun():
 
 
 PIN_LIMIT = 5  # avoid an unbounded pinned list cluttering the header
+
+
+def dm_key(uid_a, uid_b):
+    """Stable key for a private 1-on-1 thread between two accounts."""
+    a, b = sorted([uid_a, uid_b])
+    return f"dm::{a}::{b}"
+
+
+def is_dm_key(key):
+    return key.startswith("dm::")
 
 
 def highlight_mentions(text, known_names):
@@ -224,6 +237,10 @@ if "send_times" not in st.session_state:
     st.session_state.send_times = []
 if "editing_msg_id" not in st.session_state:
     st.session_state.editing_msg_id = None
+if "dm_target" not in st.session_state:
+    st.session_state.dm_target = None  # uid of the person you're DMing, or None for room mode
+if "replying_to" not in st.session_state:
+    st.session_state.replying_to = None
 
 
 def is_admin_user():
@@ -515,6 +532,46 @@ def show_recent_activity():
     if st.button("Close", use_container_width=True):
         st.rerun()
 
+
+@st.dialog("🔎 Search All Rooms", width="large")
+def show_global_search():
+    live_data = load_data()
+    query = st.text_input("Search text", key="global_search_input")
+    if not query.strip():
+        st.caption("Type something to search across every room you can see.")
+        return
+
+    q = query.strip().lower()
+    results = []
+    for room_name, msgs in live_data["rooms"].items():
+        if is_dm_key(room_name) and st.session_state.user_id not in room_name:
+            continue  # don't leak other people's DMs into global search
+        for m in msgs:
+            if q in m["text"].lower():
+                results.append({**m, "room": room_name})
+    results.sort(key=lambda m: m.get("time", ""), reverse=True)
+
+    if not results:
+        st.info("No matches.")
+        return
+
+    st.caption(f"{len(results)} match(es)")
+    for m in results[:30]:
+        color = avatar_color(m["name"])
+        room_label = "DM" if is_dm_key(m["room"]) else f'#{m["room"]}'
+        st.markdown(
+            f'<div style="display:flex; gap:10px; align-items:flex-start; margin-bottom:10px;">'
+            f'<div class="avatar" style="background:{color};">{initials(m["name"])}</div>'
+            f'<div><div class="msg-meta">'
+            f'<b style="color:white;">{m["name"]}</b> '
+            f'<span class="room-badge">{room_label}</span> '
+            f'· {relative_time(m.get("time",""))}'
+            f'</div>'
+            f'<div style="color: rgba(255,255,255,0.85);">{m["text"]}</div>'
+            f'</div></div>',
+            unsafe_allow_html=True,
+        )
+
 # ---------------------------------------------------------------------------
 # SIDEBAR
 # ---------------------------------------------------------------------------
@@ -535,9 +592,25 @@ with st.sidebar:
     st.session_state.theme = st.selectbox("Theme", list(THEMES.keys()),
                                            index=list(THEMES.keys()).index(st.session_state.theme))
 
+    my_status = data["users"].get(st.session_state.user_id, {}).get("status", "active")
+    status_options = {"active": "🟢 Active", "away": "🌙 Away", "dnd": "⛔ Do Not Disturb"}
+    chosen_status = st.selectbox(
+        "Status", list(status_options.keys()),
+        index=list(status_options.keys()).index(my_status),
+        format_func=lambda k: status_options[k],
+    )
+    if chosen_status != my_status:
+        fresh = load_data()
+        fresh["users"].setdefault(st.session_state.user_id, {})["status"] = chosen_status
+        save_data(fresh)
+        full_rerun()
+
+    if st.button("🔎 Search all rooms", use_container_width=True):
+        show_global_search()
+
     st.divider()
     st.subheader("Rooms")
-    room_names = list(data["rooms"].keys())
+    room_names = [r for r in data["rooms"].keys() if not is_dm_key(r)]
     for r in room_names:
         msgs = data["rooms"][r]
         seen = st.session_state.last_read.get(r, 0)
@@ -552,6 +625,7 @@ with st.sidebar:
         with col_a:
             if st.button(label, key=f"room_{r}", use_container_width=True):
                 st.session_state.current_room = r
+                st.session_state.dm_target = None
                 st.session_state.last_read[r] = len(msgs)
                 st.rerun()
         with col_b:
@@ -577,6 +651,33 @@ with st.sidebar:
                 st.rerun()
             elif new_room.strip() in data["rooms"]:
                 st.warning("Room already exists.")
+
+    st.divider()
+    st.subheader("Direct Messages")
+    my_uid = st.session_state.user_id
+    other_users = {
+        uid: u for uid, u in data.get("users", {}).items() if uid != my_uid
+    }
+
+    if not other_users:
+        st.caption("Nobody else has joined yet.")
+    else:
+        for uid, u in other_users.items():
+            key = dm_key(my_uid, uid)
+            thread = data["rooms"].get(key, [])
+            seen = st.session_state.last_read.get(key, 0)
+            unread = max(0, len(thread) - seen)
+            active = (st.session_state.dm_target == uid)
+            label = f"{'▶ ' if active else ''}@ {u.get('name','?')}"
+            col_dm, col_badge = st.columns([5, 1])
+            with col_dm:
+                if st.button(label, key=f"dm_{uid}", use_container_width=True):
+                    st.session_state.dm_target = uid
+                    st.session_state.last_read[key] = len(thread)
+                    st.rerun()
+            with col_badge:
+                if unread > 0 and not active:
+                    st.markdown(f'<span class="unread-badge">{unread}</span>', unsafe_allow_html=True)
 
     st.divider()
     st.subheader("Who's around")
@@ -637,6 +738,22 @@ with st.sidebar:
     st.divider()
     auto_refresh = st.checkbox("🔄 Auto-refresh", value=True)
 
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for room_name, msgs in data["rooms"].items():
+            if is_dm_key(room_name):
+                continue  # keep private threads out of the bulk export
+            lines = [
+                f"[{m.get('time','')}] {m['name']}: {m['text']}"
+                for m in sorted(msgs, key=lambda x: x.get("time", ""))
+            ]
+            zf.writestr(f"{room_name}.txt", "\n".join(lines) if lines else "(no messages)")
+    st.download_button(
+        "⬇️ Export all rooms (.zip)", data=zip_buf.getvalue(),
+        file_name="nebulachat_export.zip", mime="application/zip",
+        use_container_width=True, help="Every public room, one .txt each. Private DMs are not included.",
+    )
+
     if "notifications_on" not in st.session_state:
         st.session_state.notifications_on = False
     notif_col1, notif_col2 = st.columns([3, 2])
@@ -682,20 +799,38 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # MAIN CHAT AREA
 # ---------------------------------------------------------------------------
-room = st.session_state.current_room
-if room not in data["rooms"]:
-    room = "General"
-    st.session_state.current_room = room
+is_dm_mode = st.session_state.dm_target is not None
+if is_dm_mode:
+    other_uid = st.session_state.dm_target
+    other_user = data["users"].get(other_uid)
+    if not other_user:
+        # partner vanished (e.g. removed by admin) — fall back to room mode
+        st.session_state.dm_target = None
+        is_dm_mode = False
+
+if is_dm_mode:
+    room = dm_key(st.session_state.user_id, st.session_state.dm_target)
+    data["rooms"].setdefault(room, [])
+    display_title = f"@ {other_user.get('name', '?')}"
+else:
+    room = st.session_state.current_room
+    if room not in data["rooms"] or is_dm_key(room):
+        room = "General"
+        st.session_state.current_room = room
+    display_title = f"# {room}"
+
 st.session_state.last_read[room] = len(data["rooms"][room])
 
 data.setdefault("room_meta", {})
-topic = data["room_meta"].get(room, {}).get("topic", "")
+topic = data["room_meta"].get(room, {}).get("topic", "") if not is_dm_mode else ""
 
 header_l, header_r = st.columns([6, 1])
 with header_l:
-    st.markdown(f'<p class="chat-title"># {room}</p>', unsafe_allow_html=True)
+    st.markdown(f'<p class="chat-title">{display_title}</p>', unsafe_allow_html=True)
     sub = f"{len(data['rooms'][room])} messages"
-    if topic:
+    if is_dm_mode:
+        sub += " · private thread"
+    elif topic:
         sub += f" · {topic}"
     st.markdown(f'<p class="chat-sub">{sub}</p>', unsafe_allow_html=True)
 with header_r:
@@ -703,7 +838,7 @@ with header_r:
         if st.button("ℹ️", help="See recent activity across all rooms", key="info_btn"):
             show_recent_activity()
 
-if is_admin_user():
+if not is_dm_mode and is_admin_user():
     with st.expander("✏️ Edit room topic"):
         new_topic = st.text_input("Topic", value=topic, key=f"topic_{room}", max_chars=80)
         if st.button("Save topic", key=f"savetopic_{room}"):
@@ -712,18 +847,19 @@ if is_admin_user():
             save_data(fresh)
             full_rerun()
 
-# Pinned messages strip
-pinned_msgs = [m for m in data["rooms"][room] if m.get("pinned")][-PIN_LIMIT:]
-if pinned_msgs:
-    with st.expander(f"📌 Pinned ({len(pinned_msgs)})", expanded=False):
-        for pm in pinned_msgs:
-            st.markdown(
-                f'<div style="padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.08);">'
-                f'<b style="color:white;">{pm["name"]}</b>: '
-                f'<span style="color:rgba(255,255,255,0.8);">{pm["text"]}</span>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
+# Pinned messages strip (rooms only — pinning doesn't apply to private DMs)
+if not is_dm_mode:
+    pinned_msgs = [m for m in data["rooms"][room] if m.get("pinned")][-PIN_LIMIT:]
+    if pinned_msgs:
+        with st.expander(f"📌 Pinned ({len(pinned_msgs)})", expanded=False):
+            for pm in pinned_msgs:
+                st.markdown(
+                    f'<div style="padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.08);">'
+                    f'<b style="color:white;">{pm["name"]}</b>: '
+                    f'<span style="color:rgba(255,255,255,0.8);">{pm["text"]}</span>'
+                    f'</div>',
+                    unsafe_allow_html=True,
+                )
 
 search_col, export_col = st.columns([5, 1])
 with search_col:
@@ -737,9 +873,10 @@ with export_col:
         ts = m.get("time", "")
         export_lines.append(f"[{ts}] {m['name']}: {m['text']}")
     export_text = "\n".join(export_lines) if export_lines else "(no messages)"
+    safe_filename = room.replace("::", "_") if is_dm_mode else room
     st.download_button(
-        "⬇️", data=export_text, file_name=f"nebulachat_{room}.txt",
-        mime="text/plain", help=f"Export #{room} as .txt", use_container_width=True,
+        "⬇️", data=export_text, file_name=f"nebulachat_{safe_filename}.txt",
+        mime="text/plain", help=f"Export {display_title} as .txt", use_container_width=True,
     )
 
 
@@ -748,8 +885,24 @@ def render_chat():
     live_data = load_data()
     msgs = live_data["rooms"].get(room, [])
     known_names = [u.get("name", "") for u in live_data.get("users", {}).values()]
+    status_by_name = {
+        u.get("name", ""): u.get("status", "active")
+        for u in live_data.get("users", {}).values()
+    }
+    status_emoji = {"active": "", "away": "🌙", "dnd": "⛔"}
+    msgs_by_id = {m.get("id"): m for m in live_data["rooms"].get(room, [])}
     # WhatsApp-style strict chronological order, oldest first
     msgs = sorted(msgs, key=lambda m: m.get("time", ""))
+
+    # Read receipts: quietly record that I've now seen up to the latest
+    # message time in this thread, so others can see "Seen by ..." on
+    # their own most recent message.
+    if msgs:
+        latest_time = msgs[-1].get("time", "")
+        me = live_data["users"].get(st.session_state.user_id)
+        if me is not None and me.get("room_last_seen", {}).get(room, "") != latest_time:
+            me.setdefault("room_last_seen", {})[room] = latest_time
+            save_data(live_data)
 
     notif_enabled = st.session_state.get("notifications_on", False)
     sound_enabled = st.session_state.get("sound_on", True)
@@ -848,9 +1001,10 @@ def render_chat():
             msg_id = msg.get("id")
 
             edited_tag = '<span class="edited-tag">(edited)</span>' if msg.get("edited") else ""
+            status_e = status_emoji.get(status_by_name.get(msg["name"], "active"), "")
             meta_html = (
-                f'<div class="{meta_class}"><b style="color:white;">{msg["name"]}</b> · '
-                f'{relative_time(msg.get("time",""))}{edited_tag}</div>'
+                f'<div class="{meta_class}"><b style="color:white;">{msg["name"]}</b> '
+                f'{status_e} · {relative_time(msg.get("time",""))}{edited_tag}</div>'
             ) if show_meta else ""
 
             can_delete = msg_id and (is_mine or is_admin_user())
@@ -879,32 +1033,52 @@ def render_chat():
                 continue
 
             bubble_text = highlight_mentions(msg["text"], known_names)
+            reply_html = ""
+            reply_to_id = msg.get("reply_to")
+            if reply_to_id and reply_to_id in msgs_by_id:
+                quoted = msgs_by_id[reply_to_id]
+                snippet = quoted["text"][:80]
+                reply_html = (
+                    f'<div style="font-size:0.72rem; color:rgba(255,255,255,0.5); '
+                    f'border-left:2px solid rgba(255,255,255,0.25); padding-left:6px; margin-bottom:4px;">'
+                    f'↩️ {quoted["name"]}: {snippet}</div>'
+                )
             st.markdown(
                 f'<div class="{row_class}">'
                 f'<div class="avatar" style="background:{color};">{initials(msg["name"])}</div>'
                 f'<div>{meta_html}'
-                f'<div class="{bubble_class}">{bubble_text}</div>'
+                f'<div class="{bubble_class}">{reply_html}{bubble_text}</div>'
                 f'</div></div>',
                 unsafe_allow_html=True,
             )
 
-            pin_label = "📌" if not msg.get("pinned") else "📌 unpin"
-            action_cols = st.columns(3)
-            with action_cols[0]:
-                if st.button(pin_label, key=f"pin_{msg_id}", help="Pin/unpin this message"):
-                    fresh = load_data()
-                    for m in fresh["rooms"].get(room, []):
-                        if m.get("id") == msg_id:
-                            m["pinned"] = not m.get("pinned", False)
-                    save_data(fresh)
+            n_actions = 3 if is_dm_mode else 4
+            action_cols = st.columns(n_actions)
+            col_idx = 0
+            if not is_dm_mode:
+                pin_label = "📌" if not msg.get("pinned") else "📌 unpin"
+                with action_cols[col_idx]:
+                    if st.button(pin_label, key=f"pin_{msg_id}", help="Pin/unpin this message"):
+                        fresh = load_data()
+                        for m in fresh["rooms"].get(room, []):
+                            if m.get("id") == msg_id:
+                                m["pinned"] = not m.get("pinned", False)
+                        save_data(fresh)
+                        full_rerun()
+                col_idx += 1
+            with action_cols[col_idx]:
+                if st.button("↩️", key=f"reply_{msg_id}", help="Reply"):
+                    st.session_state.replying_to = msg_id
                     full_rerun()
+            col_idx += 1
             if can_edit:
-                with action_cols[1]:
+                with action_cols[col_idx]:
                     if st.button("✏️", key=f"edit_{msg_id}", help="Edit"):
                         st.session_state.editing_msg_id = msg_id
                         full_rerun()
+                col_idx += 1
             if can_delete:
-                with action_cols[2]:
+                with action_cols[col_idx]:
                     if st.button("🗑️", key=f"del_{msg_id}", help="Delete"):
                         fresh = load_data()
                         fresh["rooms"][room] = [
@@ -913,17 +1087,74 @@ def render_chat():
                         save_data(fresh)
                         full_rerun()
 
+        # Read receipt on your most recent message in this thread
+        my_msgs = [m for m in msgs if m["user_id"] == st.session_state.user_id]
+        if my_msgs:
+            last_mine = my_msgs[-1]
+            seers = []
+            for uid, u in live_data.get("users", {}).items():
+                if uid == st.session_state.user_id:
+                    continue
+                seen_time = u.get("room_last_seen", {}).get(room, "")
+                if seen_time and seen_time >= last_mine.get("time", ""):
+                    seers.append(u.get("name", "?"))
+            if seers:
+                st.caption(f"✓✓ Seen by {', '.join(seers)}")
+
 
 render_chat()
 
 # ---------------------------------------------------------------------------
 # MESSAGE INPUT
 # ---------------------------------------------------------------------------
-st.caption("Tip: type @name to mention someone · /roll, /shrug, /clear")
+recipient_options = ["💬 Everyone"] + [
+    f"@ {u.get('name','?')}" for uid, u in data.get("users", {}).items()
+    if uid != st.session_state.user_id
+]
+recipient_uid_by_label = {
+    f"@ {u.get('name','?')}": uid for uid, u in data.get("users", {}).items()
+    if uid != st.session_state.user_id
+}
+current_label = (
+    f"@ {other_user.get('name','?')}" if is_dm_mode else "💬 Everyone"
+)
+chosen_label = st.selectbox(
+    "To:", recipient_options,
+    index=recipient_options.index(current_label) if current_label in recipient_options else 0,
+    key="recipient_selector",
+)
+if chosen_label != current_label:
+    if chosen_label == "💬 Everyone":
+        st.session_state.dm_target = None
+    else:
+        st.session_state.dm_target = recipient_uid_by_label[chosen_label]
+    full_rerun()
+
+if st.session_state.replying_to:
+    replying_msg = None
+    for m in data["rooms"].get(room, []):
+        if m.get("id") == st.session_state.replying_to:
+            replying_msg = m
+            break
+    if replying_msg:
+        rcol1, rcol2 = st.columns([6, 1])
+        with rcol1:
+            st.caption(f"↩️ Replying to {replying_msg['name']}: {replying_msg['text'][:60]}")
+        with rcol2:
+            if st.button("✕", key="cancel_reply", help="Cancel reply"):
+                st.session_state.replying_to = None
+                st.rerun()
+    else:
+        st.session_state.replying_to = None
+
+st.caption("Tip: type @name to mention someone · /roll, /shrug, /clear · max 500 chars")
 with st.form("send_form", clear_on_submit=True):
     col1, col2 = st.columns([5, 1])
     with col1:
-        text = st.text_input("Message", label_visibility="collapsed", placeholder=f"Message #{room}...")
+        placeholder = f"Message @{other_user.get('name','')}..." if is_dm_mode else f"Message #{room}..."
+        text = st.text_input(
+            "Message", label_visibility="collapsed", placeholder=placeholder, max_chars=500
+        )
     with col2:
         submitted = st.form_submit_button("Send 🚀", use_container_width=True)
 
@@ -941,7 +1172,6 @@ with st.form("send_form", clear_on_submit=True):
             save_data(fresh)
             st.rerun()
         else:
-            import random
             if raw.lower().startswith("/roll"):
                 sides = 6
                 parts = raw.split()
@@ -963,8 +1193,10 @@ with st.form("send_form", clear_on_submit=True):
                 "text": final_text,
                 "time": datetime.now().isoformat(),
                 "pinned": False,
+                "reply_to": st.session_state.replying_to,
             })
             fresh["rooms"][room] = fresh["rooms"][room][-500:]
             save_data(fresh)
             st.session_state.last_read[room] = len(fresh["rooms"][room])
+            st.session_state.replying_to = None
             st.rerun()
