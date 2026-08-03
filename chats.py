@@ -1,3 +1,4 @@
+
 import streamlit as st
 import streamlit.components.v1 as components
 import json
@@ -5,15 +6,12 @@ import os
 import uuid
 import hashlib
 from datetime import datetime
-
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="NebulaChat", page_icon="💬", layout="wide")
-
 DATA_FILE = "nebulachat_data.json"
 REFRESH_INTERVAL = 3  # seconds
-
 # Change this to whatever you like — whoever enters it in the sidebar
 # gets permission to remove people from "Who's around". Everyone can
 # already delete individual messages; only the admin can remove users.
@@ -24,7 +22,6 @@ try:
     ADMIN_PASSCODE = st.secrets["ADMIN_PASSCODE"]
 except Exception:
     ADMIN_PASSCODE = "nebula-admin"
-
 THEMES = {
     "Default": {"primary": "#7B61FF", "secondary": "#00D9FF", "bg1": "#0A0E27", "bg2": "#1A1E3F"},
     "Cyberpunk": {"primary": "#FF2E63", "secondary": "#00FFF5", "bg1": "#0D0221", "bg2": "#241734"},
@@ -32,23 +29,16 @@ THEMES = {
     "Ocean": {"primary": "#00B4D8", "secondary": "#48CAE4", "bg1": "#03071E", "bg2": "#0A1128"},
     "Midnight": {"primary": "#9D4EDD", "secondary": "#5A189A", "bg1": "#000000", "bg2": "#10002B"},
 }
-
 AVATAR_PALETTE = ["#FF6B6B", "#4ECDC4", "#FFD93D", "#7B61FF", "#00D9FF",
                    "#FF8C42", "#9D4EDD", "#48CAE4", "#FF2E63", "#06D6A0"]
-
-
 def avatar_color(name):
     h = int(hashlib.md5(name.encode()).hexdigest(), 16)
     return AVATAR_PALETTE[h % len(AVATAR_PALETTE)]
-
-
 def initials(name):
     parts = name.strip().split()
     if len(parts) == 1:
         return parts[0][:2].upper()
     return (parts[0][0] + parts[-1][0]).upper()
-
-
 def relative_time(iso_str):
     try:
         t = datetime.fromisoformat(iso_str)
@@ -62,8 +52,6 @@ def relative_time(iso_str):
     if diff < 86400:
         return f"{int(diff // 3600)}h ago"
     return t.strftime("%b %d, %H:%M")
-
-
 def full_rerun():
     """Force a full-app rerun even when called from inside a fragment.
     Falls back gracefully on older Streamlit versions without scope support."""
@@ -71,11 +59,27 @@ def full_rerun():
         st.rerun(scope="app")
     except TypeError:
         st.rerun()
-
-
-PIN_LIMIT = 5  # avoid an unbounded pinned list cluttering the header
-
-
+def force_signout(reason=None):
+    """Kick the current session back to the username gate: clear identity
+    from session state, the URL, and localStorage. Used when an admin
+    removes this user from 'Who's around' — their session should not be
+    able to keep posting/reading as a now-deleted account."""
+    st.session_state.username = None
+    st.session_state.identity_checked = False
+    if reason:
+        st.session_state.signed_out_reason = reason
+    st.query_params.clear()
+    components.html(
+        """
+        <script>
+        window.parent.localStorage.removeItem('nebulachat_uid');
+        window.parent.localStorage.removeItem('nebulachat_name');
+        </script>
+        """,
+        height=0,
+    )
+    full_rerun()
+REACTIONS = ["👍", "❤️", "😂", "🎉"]
 def highlight_mentions(text, known_names):
     """Wrap @name mentions in a highlight span if the name matches a
     known user (case-insensitive). Longer names are matched first so
@@ -102,7 +106,6 @@ def highlight_mentions(text, known_names):
         escaped = "".join(out)
         lower_escaped = escaped.lower()
     return escaped
-
 # ---------------------------------------------------------------------------
 # DATA LAYER
 # ---------------------------------------------------------------------------
@@ -116,7 +119,6 @@ def load_data():
     else:
         d = {"rooms": {"General": []}, "users": {}, "admin_uids": []}
     d.setdefault("admin_uids", [])
-
     # Backfill ids for messages saved before delete support existed,
     # otherwise their delete button has nothing to key off of.
     dirty = False
@@ -133,7 +135,6 @@ def load_data():
     for uid, u in d.get("users", {}).items():
         key = u.get("name", "").strip().lower()
         by_name.setdefault(key, []).append((uid, u))
-
     uid_remap = {}
     for key, entries in by_name.items():
         if len(entries) <= 1:
@@ -147,33 +148,24 @@ def load_data():
                 canonical_user["last_seen"] = last_seen_u
             d["users"].pop(uid, None)
         dirty = True
-
     if uid_remap:
         for room_msgs in d.get("rooms", {}).values():
             for m in room_msgs:
                 if m.get("user_id") in uid_remap:
                     m["user_id"] = uid_remap[m["user_id"]]
-
     if dirty:
         with open(DATA_FILE, "w") as f:
             json.dump(d, f, indent=2)
-
     return d
-
-
 def save_data(data):
     with open(DATA_FILE, "w") as f:
         json.dump(data, f, indent=2)
-
-
 data = load_data()
-
 # ---------------------------------------------------------------------------
 # SESSION / IDENTITY
 # ---------------------------------------------------------------------------
 if "identity_checked" not in st.session_state:
     st.session_state.identity_checked = False
-
 if "user_id" not in st.session_state:
     qp_uid = st.query_params.get("uid")
     st.session_state.user_id = qp_uid if qp_uid else str(uuid.uuid4())[:8]
@@ -189,7 +181,8 @@ if "username" not in st.session_state:
         save_data(data)
     else:
         st.session_state.username = None
-
+if "signed_out_reason" not in st.session_state:
+    st.session_state.signed_out_reason = None
 # If we still don't have an identity, try bouncing through localStorage once.
 # This makes identity persist across visits even without the uid/name query
 # params in the URL (e.g. opening the app fresh from the launcher).
@@ -224,21 +217,18 @@ if "send_times" not in st.session_state:
     st.session_state.send_times = []
 if "editing_msg_id" not in st.session_state:
     st.session_state.editing_msg_id = None
-
-
 def is_admin_user():
     """Admin status is tied to your account (uid), stored in the shared
     data file, so it persists across sessions/devices/tabs — not just
     the browser tab where you happened to unlock it."""
     live = load_data()
     return st.session_state.get("user_id") in live.get("admin_uids", [])
-
 theme = THEMES[st.session_state.theme]
-
 # If this session's user_id was merged away (duplicate-name cleanup),
 # adopt whichever uid the users table now has for this name so we don't
 # spawn a fresh duplicate on the next message.
 if st.session_state.username and st.session_state.user_id not in data.get("users", {}):
+    remapped = False
     for uid, u in data.get("users", {}).items():
         if u.get("name", "").strip().lower() == st.session_state.username.strip().lower():
             st.session_state.user_id = uid
@@ -251,22 +241,24 @@ if st.session_state.username and st.session_state.user_id not in data.get("users
                 """,
                 height=0,
             )
+            remapped = True
             break
-
+    # If no account anywhere matches this name, this session's account was
+    # deleted outright (an admin removed it in "Who's around") rather than
+    # merged into another one — sign this session out.
+    if not remapped:
+        force_signout(reason="removed")
 # ---------------------------------------------------------------------------
 # STYLING
 # ---------------------------------------------------------------------------
 st.markdown(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap');
-
 html, body, [class*="css"] {{ font-family: 'Outfit', sans-serif; }}
-
 .stApp {{
     background: radial-gradient(ellipse at top, {theme['bg2']} 0%, {theme['bg1']} 60%);
     background-attachment: fixed;
 }}
-
 .stApp::before {{
     content: "";
     position: fixed;
@@ -283,7 +275,6 @@ html, body, [class*="css"] {{ font-family: 'Outfit', sans-serif; }}
     pointer-events: none;
     z-index: 0;
 }}
-
 .glass-card {{
     background: rgba(255, 255, 255, 0.05);
     backdrop-filter: blur(16px);
@@ -293,7 +284,6 @@ html, body, [class*="css"] {{ font-family: 'Outfit', sans-serif; }}
     box-shadow: 0 8px 32px rgba(0,0,0,0.3);
     margin-bottom: 0.8rem;
 }}
-
 .chat-title {{
     font-size: 2.2rem;
     font-weight: 800;
@@ -303,12 +293,9 @@ html, body, [class*="css"] {{ font-family: 'Outfit', sans-serif; }}
     margin-bottom: 0;
     display: inline-block;
 }}
-
 .chat-sub {{ color: rgba(255,255,255,0.5); font-size: 0.95rem; margin-top: -8px; }}
-
 .msg-row {{ display: flex; align-items: flex-start; gap: 10px; margin: 14px 0; }}
 .msg-row.mine {{ flex-direction: row-reverse; }}
-
 .avatar {{
     width: 38px; height: 38px; min-width: 38px;
     border-radius: 50%;
@@ -317,7 +304,6 @@ html, body, [class*="css"] {{ font-family: 'Outfit', sans-serif; }}
     box-shadow: 0 0 10px rgba(0,0,0,0.3);
     margin-top: 2px;
 }}
-
 .msg-bubble-mine {{
     background: linear-gradient(135deg, {theme['primary']}44, {theme['secondary']}22);
     border: 1px solid {theme['primary']}66;
@@ -327,7 +313,6 @@ html, body, [class*="css"] {{ font-family: 'Outfit', sans-serif; }}
     line-height: 1.5;
     max-width: 70%;
 }}
-
 .msg-bubble-other {{
     background: rgba(255,255,255,0.07);
     border: 1px solid rgba(255,255,255,0.12);
@@ -337,36 +322,29 @@ html, body, [class*="css"] {{ font-family: 'Outfit', sans-serif; }}
     line-height: 1.5;
     max-width: 70%;
 }}
-
 .msg-meta {{ font-size: 0.72rem; color: rgba(255,255,255,0.4); margin-bottom: 5px; }}
 .msg-meta.mine {{ text-align: right; }}
-
 .room-badge {{
     display: inline-flex; align-items: center; gap: 6px;
     padding: 3px 10px; border-radius: 999px;
     background: {theme['primary']}33; color: {theme['secondary']};
     font-size: 0.72rem; font-weight: 600;
 }}
-
 .online-dot {{
     height: 8px; width: 8px;
     background-color: {theme['secondary']};
     border-radius: 50%; display: inline-block;
     box-shadow: 0 0 8px {theme['secondary']};
 }}
-
 .unread-badge {{
     background: {theme['primary']};
     color: white; font-size: 0.65rem; font-weight: 700;
     border-radius: 999px; padding: 1px 7px; margin-left: 6px;
 }}
-
 section[data-testid="stSidebar"] {{ background: rgba(10, 14, 39, 0.6); backdrop-filter: blur(10px); }}
 ::-webkit-scrollbar {{ width: 8px; }}
 ::-webkit-scrollbar-thumb {{ background: {theme['primary']}66; border-radius: 4px; }}
-
 div.st-key-chat_scroll {{ padding: 8px 14px; }}
-
 div.st-key-chat_scroll button {{
     font-size: 0.7rem !important;
     padding: 1px 8px !important;
@@ -381,13 +359,11 @@ div.st-key-chat_scroll button:hover {{
     color: #FF6B6B !important;
     border-color: #FF6B6B66 !important;
 }}
-
 div.st-key-info_btn_wrap button {{
     border-radius: 50% !important;
     width: 42px; height: 42px;
     font-weight: 700;
 }}
-
 .mention {{
     background: {theme['secondary']}33;
     color: {theme['secondary']};
@@ -395,7 +371,6 @@ div.st-key-info_btn_wrap button {{
     padding: 0 3px;
     border-radius: 4px;
 }}
-
 .reaction-pill {{
     display: inline-block;
     font-size: 0.72rem;
@@ -411,7 +386,6 @@ div.st-key-info_btn_wrap button {{
     border-color: {theme['primary']}88;
     color: white;
 }}
-
 .edited-tag {{
     font-size: 0.65rem;
     color: rgba(255,255,255,0.35);
@@ -420,13 +394,15 @@ div.st-key-info_btn_wrap button {{
 }}
 </style>
 """, unsafe_allow_html=True)
-
 # ---------------------------------------------------------------------------
 # USERNAME GATE
 # ---------------------------------------------------------------------------
 if not st.session_state.username:
     st.markdown('<p class="chat-title">💬 NebulaChat</p>', unsafe_allow_html=True)
     st.markdown('<p class="chat-sub">A multi-user messaging demo across the App Universe</p>', unsafe_allow_html=True)
+    if st.session_state.get("signed_out_reason") == "removed":
+        st.warning("You were removed from NebulaChat by an admin. Sign in again to rejoin.")
+        st.session_state.signed_out_reason = None
     st.write("")
     with st.container():
         st.markdown('<div class="glass-card">', unsafe_allow_html=True)
@@ -435,7 +411,6 @@ if not st.session_state.username:
             entered_name = name.strip()
             if entered_name:
                 fresh = load_data()
-
                 # If this name already belongs to someone, reuse that
                 # account instead of creating a new one.
                 existing_uid = None
@@ -443,7 +418,6 @@ if not st.session_state.username:
                     if u.get("name", "").strip().lower() == entered_name.lower():
                         existing_uid = uid
                         break
-
                 if existing_uid:
                     st.session_state.user_id = existing_uid
                     fresh["users"][existing_uid]["last_seen"] = datetime.now().isoformat()
@@ -453,7 +427,6 @@ if not st.session_state.username:
                         "joined": datetime.now().isoformat(),
                         "last_seen": datetime.now().isoformat(),
                     }
-
                 st.session_state.username = entered_name
                 save_data(fresh)
                 st.query_params["uid"] = st.session_state.user_id
@@ -472,7 +445,6 @@ if not st.session_state.username:
                 st.warning("Enter a name first.")
         st.markdown('</div>', unsafe_allow_html=True)
     st.stop()
-
 # ---------------------------------------------------------------------------
 # RECENT ACTIVITY DIALOG (the "i" button)
 # ---------------------------------------------------------------------------
@@ -484,19 +456,15 @@ def show_recent_activity():
         for m in msgs:
             all_msgs.append({**m, "room": room_name})
     all_msgs.sort(key=lambda m: m.get("time", ""), reverse=True)
-
     if not all_msgs:
         st.info("No messages anywhere yet — be the first to say something!")
         return
-
     c1, c2, c3 = st.columns(3)
     c1.metric("Messages", len(all_msgs))
     c2.metric("Rooms", len(live_data["rooms"]))
     c3.metric("Users seen", len(live_data["users"]))
-
     st.divider()
     st.caption("Most recent across all rooms")
-
     for m in all_msgs[:25]:
         color = avatar_color(m["name"])
         st.markdown(
@@ -511,10 +479,8 @@ def show_recent_activity():
             f'</div></div>',
             unsafe_allow_html=True,
         )
-
     if st.button("Close", use_container_width=True):
         st.rerun()
-
 # ---------------------------------------------------------------------------
 # SIDEBAR
 # ---------------------------------------------------------------------------
@@ -531,10 +497,8 @@ with st.sidebar:
         unsafe_allow_html=True,
     )
     st.divider()
-
     st.session_state.theme = st.selectbox("Theme", list(THEMES.keys()),
                                            index=list(THEMES.keys()).index(st.session_state.theme))
-
     st.divider()
     st.subheader("Rooms")
     room_names = list(data["rooms"].keys())
@@ -566,7 +530,6 @@ with st.sidebar:
                     if st.session_state.current_room == r:
                         st.session_state.current_room = next(iter(fresh["rooms"]), "General")
                     full_rerun()
-
     with st.expander("➕ New room"):
         new_room = st.text_input("Room name", key="new_room_input")
         if st.button("Create room"):
@@ -577,17 +540,20 @@ with st.sidebar:
                 st.rerun()
             elif new_room.strip() in data["rooms"]:
                 st.warning("Room already exists.")
-
     st.divider()
     st.subheader("Who's around")
-
     @st.fragment(run_every=REFRESH_INTERVAL)
     def render_presence():
         live = load_data()
+        # If this session's account no longer exists, an admin removed it
+        # from "Who's around". Force this session back to the sign-in gate
+        # rather than letting it keep chatting as a ghost account.
+        if st.session_state.username and st.session_state.user_id not in live.get("users", {}):
+            force_signout(reason="removed")
+            return
         if st.session_state.user_id in live["users"]:
             live["users"][st.session_state.user_id]["last_seen"] = datetime.now().isoformat()
             save_data(live)
-
         now = datetime.now()
         for uid, u in list(live.get("users", {}).items()):
             try:
@@ -608,9 +574,7 @@ with st.sidebar:
                         full_rerun()
             else:
                 st.caption(f"{dot} {u['name']}")
-
     render_presence()
-
     with st.expander("🔑 Admin"):
         if is_admin_user():
             st.success("Admin unlocked — you can remove people and delete anyone's messages, on any device.")
@@ -633,10 +597,8 @@ with st.sidebar:
                     st.rerun()
                 else:
                     st.error("Wrong passcode.")
-
     st.divider()
     auto_refresh = st.checkbox("🔄 Auto-refresh", value=True)
-
     if "notifications_on" not in st.session_state:
         st.session_state.notifications_on = False
     notif_col1, notif_col2 = st.columns([3, 2])
@@ -646,7 +608,6 @@ with st.sidebar:
         )
     with notif_col2:
         sound_on = st.checkbox("🔊 Sound", value=True, key="sound_on")
-
     if st.session_state.notifications_on:
         components.html(
             """
@@ -659,26 +620,13 @@ with st.sidebar:
             height=0,
         )
     if st.button("🚪 Leave chat"):
-        st.session_state.username = None
-        st.session_state.identity_checked = False
-        st.query_params.clear()
-        components.html(
-            """
-            <script>
-            window.parent.localStorage.removeItem('nebulachat_uid');
-            window.parent.localStorage.removeItem('nebulachat_name');
-            </script>
-            """,
-            height=0,
-        )
-        st.rerun()
-
+        force_signout()
 # ---------------------------------------------------------------------------
 # NOTE: presence (last_seen) is now kept alive continuously via the
 # render_presence() fragment above, so it no longer depends on full-page
-# reruns like the chat message polling does.
+# reruns like the chat message polling does. That same fragment is also
+# what detects an admin-initiated removal and signs this session out.
 # ---------------------------------------------------------------------------
-
 # ---------------------------------------------------------------------------
 # MAIN CHAT AREA
 # ---------------------------------------------------------------------------
@@ -687,62 +635,18 @@ if room not in data["rooms"]:
     room = "General"
     st.session_state.current_room = room
 st.session_state.last_read[room] = len(data["rooms"][room])
-
-data.setdefault("room_meta", {})
-topic = data["room_meta"].get(room, {}).get("topic", "")
-
 header_l, header_r = st.columns([6, 1])
 with header_l:
     st.markdown(f'<p class="chat-title"># {room}</p>', unsafe_allow_html=True)
-    sub = f"{len(data['rooms'][room])} messages"
-    if topic:
-        sub += f" · {topic}"
-    st.markdown(f'<p class="chat-sub">{sub}</p>', unsafe_allow_html=True)
+    st.markdown(f'<p class="chat-sub">{len(data["rooms"][room])} messages</p>', unsafe_allow_html=True)
 with header_r:
     with st.container(key="info_btn_wrap"):
         if st.button("ℹ️", help="See recent activity across all rooms", key="info_btn"):
             show_recent_activity()
-
-if is_admin_user():
-    with st.expander("✏️ Edit room topic"):
-        new_topic = st.text_input("Topic", value=topic, key=f"topic_{room}", max_chars=80)
-        if st.button("Save topic", key=f"savetopic_{room}"):
-            fresh = load_data()
-            fresh.setdefault("room_meta", {}).setdefault(room, {})["topic"] = new_topic.strip()
-            save_data(fresh)
-            full_rerun()
-
-# Pinned messages strip
-pinned_msgs = [m for m in data["rooms"][room] if m.get("pinned")][-PIN_LIMIT:]
-if pinned_msgs:
-    with st.expander(f"📌 Pinned ({len(pinned_msgs)})", expanded=False):
-        for pm in pinned_msgs:
-            st.markdown(
-                f'<div style="padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.08);">'
-                f'<b style="color:white;">{pm["name"]}</b>: '
-                f'<span style="color:rgba(255,255,255,0.8);">{pm["text"]}</span>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-
-search_col, export_col = st.columns([5, 1])
-with search_col:
-    st.session_state.search_query = st.text_input(
-        "Search", placeholder="🔍 Search messages in this room...", label_visibility="collapsed",
-        value=st.session_state.search_query
-    )
-with export_col:
-    export_lines = []
-    for m in sorted(data["rooms"][room], key=lambda x: x.get("time", "")):
-        ts = m.get("time", "")
-        export_lines.append(f"[{ts}] {m['name']}: {m['text']}")
-    export_text = "\n".join(export_lines) if export_lines else "(no messages)"
-    st.download_button(
-        "⬇️", data=export_text, file_name=f"nebulachat_{room}.txt",
-        mime="text/plain", help=f"Export #{room} as .txt", use_container_width=True,
-    )
-
-
+st.session_state.search_query = st.text_input(
+    "Search", placeholder="🔍 Search messages in this room...", label_visibility="collapsed",
+    value=st.session_state.search_query
+)
 @st.fragment(run_every=REFRESH_INTERVAL if auto_refresh else None)
 def render_chat():
     live_data = load_data()
@@ -750,7 +654,6 @@ def render_chat():
     known_names = [u.get("name", "") for u in live_data.get("users", {}).values()]
     # WhatsApp-style strict chronological order, oldest first
     msgs = sorted(msgs, key=lambda m: m.get("time", ""))
-
     if st.session_state.get("notifications_on"):
         last_msg = msgs[-1] if msgs else None
         if last_msg and last_msg.get("user_id") != st.session_state.user_id:
@@ -769,7 +672,6 @@ def render_chat():
                     const thisId = {safe_id};
                     if (lastId === thisId) {{ return; }}
                     w.localStorage.setItem(lastNotifiedKey, thisId);
-
                     // Notification bubble (foreground/backgrounded tab only —
                     // this cannot fire if the browser itself is fully closed)
                     if (w.Notification && w.Notification.permission === "granted" && w.document.hidden) {{
@@ -779,7 +681,6 @@ def render_chat():
                             }});
                         }} catch (e) {{}}
                     }}
-
                     // Flash the tab title if backgrounded
                     if (w.document.hidden) {{
                         if (!w._nebulaOriginalTitle) {{
@@ -804,7 +705,6 @@ def render_chat():
                             }}
                         }});
                     }}
-
                     // Sound ping (plays regardless of focus, as long as tab is open)
                     if ({play_sound}) {{
                         try {{
@@ -825,11 +725,9 @@ def render_chat():
                 """,
                 height=0,
             )
-
     query = st.session_state.search_query.strip().lower()
     if query:
         msgs = [m for m in msgs if query in m["text"].lower()]
-
     with st.container(height=480, key="chat_scroll"):
         if not msgs:
             st.caption("No messages match yet." if query else "No messages yet — say hello 👋")
@@ -843,16 +741,13 @@ def render_chat():
             show_meta = (msg["name"] != last_sender)
             last_sender = msg["name"]
             msg_id = msg.get("id")
-
             edited_tag = '<span class="edited-tag">(edited)</span>' if msg.get("edited") else ""
             meta_html = (
                 f'<div class="{meta_class}"><b style="color:white;">{msg["name"]}</b> · '
                 f'{relative_time(msg.get("time",""))}{edited_tag}</div>'
             ) if show_meta else ""
-
             can_delete = msg_id and (is_mine or is_admin_user())
             can_edit = msg_id and is_mine
-
             if st.session_state.editing_msg_id == msg_id:
                 new_text = st.text_input(
                     "Edit message", value=msg["text"], key=f"editbox_{msg_id}",
@@ -874,7 +769,6 @@ def render_chat():
                         st.session_state.editing_msg_id = None
                         full_rerun()
                 continue
-
             bubble_text = highlight_mentions(msg["text"], known_names)
             st.markdown(
                 f'<div class="{row_class}">'
@@ -884,24 +778,38 @@ def render_chat():
                 f'</div></div>',
                 unsafe_allow_html=True,
             )
-
-            pin_label = "📌" if not msg.get("pinned") else "📌 unpin"
-            action_cols = st.columns(3)
-            with action_cols[0]:
-                if st.button(pin_label, key=f"pin_{msg_id}", help="Pin/unpin this message"):
-                    fresh = load_data()
-                    for m in fresh["rooms"].get(room, []):
-                        if m.get("id") == msg_id:
-                            m["pinned"] = not m.get("pinned", False)
-                    save_data(fresh)
-                    full_rerun()
+            # Reactions summary + picker
+            reactions = msg.get("reactions", {})
+            pill_html = ""
+            for emoji, uids in reactions.items():
+                if not uids:
+                    continue
+                mine_cls = " mine" if st.session_state.user_id in uids else ""
+                pill_html += f'<span class="reaction-pill{mine_cls}">{emoji} {len(uids)}</span>'
+            if pill_html:
+                st.markdown(pill_html, unsafe_allow_html=True)
+            action_cols = st.columns(len(REACTIONS) + 2)
+            for i, emoji in enumerate(REACTIONS):
+                with action_cols[i]:
+                    if st.button(emoji, key=f"react_{msg_id}_{emoji}", help=f"React {emoji}"):
+                        fresh = load_data()
+                        for m in fresh["rooms"].get(room, []):
+                            if m.get("id") == msg_id:
+                                m.setdefault("reactions", {}).setdefault(emoji, [])
+                                uids_list = m["reactions"][emoji]
+                                if st.session_state.user_id in uids_list:
+                                    uids_list.remove(st.session_state.user_id)
+                                else:
+                                    uids_list.append(st.session_state.user_id)
+                        save_data(fresh)
+                        full_rerun()
             if can_edit:
-                with action_cols[1]:
+                with action_cols[len(REACTIONS)]:
                     if st.button("✏️", key=f"edit_{msg_id}", help="Edit"):
                         st.session_state.editing_msg_id = msg_id
                         full_rerun()
             if can_delete:
-                with action_cols[2]:
+                with action_cols[len(REACTIONS) + 1]:
                     if st.button("🗑️", key=f"del_{msg_id}", help="Delete"):
                         fresh = load_data()
                         fresh["rooms"][room] = [
@@ -909,47 +817,23 @@ def render_chat():
                         ]
                         save_data(fresh)
                         full_rerun()
-
-
 render_chat()
-
 # ---------------------------------------------------------------------------
 # MESSAGE INPUT
 # ---------------------------------------------------------------------------
-st.caption("Tip: type @name to mention someone · /roll, /shrug, /clear")
+st.caption("Tip: type @name to mention someone.")
 with st.form("send_form", clear_on_submit=True):
     col1, col2 = st.columns([5, 1])
     with col1:
         text = st.text_input("Message", label_visibility="collapsed", placeholder=f"Message #{room}...")
     with col2:
         submitted = st.form_submit_button("Send 🚀", use_container_width=True)
-
     if submitted and text.strip():
-        raw = text.strip()
         now = datetime.now().timestamp()
         st.session_state.send_times = [t for t in st.session_state.send_times if now - t < 2]
         if len(st.session_state.send_times) >= 3:
             st.warning("You're sending messages too fast — slow down a moment.")
-        elif raw.lower() == "/clear":
-            fresh = load_data()
-            fresh["rooms"][room] = [
-                m for m in fresh["rooms"].get(room, []) if m.get("user_id") != st.session_state.user_id
-            ]
-            save_data(fresh)
-            st.rerun()
         else:
-            import random
-            if raw.lower().startswith("/roll"):
-                sides = 6
-                parts = raw.split()
-                if len(parts) > 1 and parts[1].isdigit():
-                    sides = int(parts[1])
-                final_text = f"🎲 rolled a {random.randint(1, sides)} (d{sides})"
-            elif raw.lower() == "/shrug":
-                final_text = "¯\\_(ツ)_/¯"
-            else:
-                final_text = raw
-
             st.session_state.send_times.append(now)
             fresh = load_data()
             fresh["rooms"].setdefault(room, [])
@@ -957,9 +841,9 @@ with st.form("send_form", clear_on_submit=True):
                 "id": str(uuid.uuid4())[:10],
                 "user_id": st.session_state.user_id,
                 "name": st.session_state.username,
-                "text": final_text,
+                "text": text.strip(),
                 "time": datetime.now().isoformat(),
-                "pinned": False,
+                "reactions": {},
             })
             fresh["rooms"][room] = fresh["rooms"][room][-500:]
             save_data(fresh)
