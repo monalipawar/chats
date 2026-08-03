@@ -73,7 +73,7 @@ def full_rerun():
         st.rerun()
 
 
-REACTIONS = ["👍", "❤️", "😂", "🎉"]
+PIN_LIMIT = 5  # avoid an unbounded pinned list cluttering the header
 
 
 def highlight_mentions(text, known_names):
@@ -688,19 +688,59 @@ if room not in data["rooms"]:
     st.session_state.current_room = room
 st.session_state.last_read[room] = len(data["rooms"][room])
 
+data.setdefault("room_meta", {})
+topic = data["room_meta"].get(room, {}).get("topic", "")
+
 header_l, header_r = st.columns([6, 1])
 with header_l:
     st.markdown(f'<p class="chat-title"># {room}</p>', unsafe_allow_html=True)
-    st.markdown(f'<p class="chat-sub">{len(data["rooms"][room])} messages</p>', unsafe_allow_html=True)
+    sub = f"{len(data['rooms'][room])} messages"
+    if topic:
+        sub += f" · {topic}"
+    st.markdown(f'<p class="chat-sub">{sub}</p>', unsafe_allow_html=True)
 with header_r:
     with st.container(key="info_btn_wrap"):
         if st.button("ℹ️", help="See recent activity across all rooms", key="info_btn"):
             show_recent_activity()
 
-st.session_state.search_query = st.text_input(
-    "Search", placeholder="🔍 Search messages in this room...", label_visibility="collapsed",
-    value=st.session_state.search_query
-)
+if is_admin_user():
+    with st.expander("✏️ Edit room topic"):
+        new_topic = st.text_input("Topic", value=topic, key=f"topic_{room}", max_chars=80)
+        if st.button("Save topic", key=f"savetopic_{room}"):
+            fresh = load_data()
+            fresh.setdefault("room_meta", {}).setdefault(room, {})["topic"] = new_topic.strip()
+            save_data(fresh)
+            full_rerun()
+
+# Pinned messages strip
+pinned_msgs = [m for m in data["rooms"][room] if m.get("pinned")][-PIN_LIMIT:]
+if pinned_msgs:
+    with st.expander(f"📌 Pinned ({len(pinned_msgs)})", expanded=False):
+        for pm in pinned_msgs:
+            st.markdown(
+                f'<div style="padding:6px 0; border-bottom:1px solid rgba(255,255,255,0.08);">'
+                f'<b style="color:white;">{pm["name"]}</b>: '
+                f'<span style="color:rgba(255,255,255,0.8);">{pm["text"]}</span>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+
+search_col, export_col = st.columns([5, 1])
+with search_col:
+    st.session_state.search_query = st.text_input(
+        "Search", placeholder="🔍 Search messages in this room...", label_visibility="collapsed",
+        value=st.session_state.search_query
+    )
+with export_col:
+    export_lines = []
+    for m in sorted(data["rooms"][room], key=lambda x: x.get("time", "")):
+        ts = m.get("time", "")
+        export_lines.append(f"[{ts}] {m['name']}: {m['text']}")
+    export_text = "\n".join(export_lines) if export_lines else "(no messages)"
+    st.download_button(
+        "⬇️", data=export_text, file_name=f"nebulachat_{room}.txt",
+        mime="text/plain", help=f"Export #{room} as .txt", use_container_width=True,
+    )
 
 
 @st.fragment(run_every=REFRESH_INTERVAL if auto_refresh else None)
@@ -845,39 +885,23 @@ def render_chat():
                 unsafe_allow_html=True,
             )
 
-            # Reactions summary + picker
-            reactions = msg.get("reactions", {})
-            pill_html = ""
-            for emoji, uids in reactions.items():
-                if not uids:
-                    continue
-                mine_cls = " mine" if st.session_state.user_id in uids else ""
-                pill_html += f'<span class="reaction-pill{mine_cls}">{emoji} {len(uids)}</span>'
-            if pill_html:
-                st.markdown(pill_html, unsafe_allow_html=True)
-
-            action_cols = st.columns(len(REACTIONS) + 2)
-            for i, emoji in enumerate(REACTIONS):
-                with action_cols[i]:
-                    if st.button(emoji, key=f"react_{msg_id}_{emoji}", help=f"React {emoji}"):
-                        fresh = load_data()
-                        for m in fresh["rooms"].get(room, []):
-                            if m.get("id") == msg_id:
-                                m.setdefault("reactions", {}).setdefault(emoji, [])
-                                uids_list = m["reactions"][emoji]
-                                if st.session_state.user_id in uids_list:
-                                    uids_list.remove(st.session_state.user_id)
-                                else:
-                                    uids_list.append(st.session_state.user_id)
-                        save_data(fresh)
-                        full_rerun()
+            pin_label = "📌" if not msg.get("pinned") else "📌 unpin"
+            action_cols = st.columns(3)
+            with action_cols[0]:
+                if st.button(pin_label, key=f"pin_{msg_id}", help="Pin/unpin this message"):
+                    fresh = load_data()
+                    for m in fresh["rooms"].get(room, []):
+                        if m.get("id") == msg_id:
+                            m["pinned"] = not m.get("pinned", False)
+                    save_data(fresh)
+                    full_rerun()
             if can_edit:
-                with action_cols[len(REACTIONS)]:
+                with action_cols[1]:
                     if st.button("✏️", key=f"edit_{msg_id}", help="Edit"):
                         st.session_state.editing_msg_id = msg_id
                         full_rerun()
             if can_delete:
-                with action_cols[len(REACTIONS) + 1]:
+                with action_cols[2]:
                     if st.button("🗑️", key=f"del_{msg_id}", help="Delete"):
                         fresh = load_data()
                         fresh["rooms"][room] = [
@@ -892,7 +916,7 @@ render_chat()
 # ---------------------------------------------------------------------------
 # MESSAGE INPUT
 # ---------------------------------------------------------------------------
-st.caption("Tip: type @name to mention someone.")
+st.caption("Tip: type @name to mention someone · /roll, /shrug, /clear")
 with st.form("send_form", clear_on_submit=True):
     col1, col2 = st.columns([5, 1])
     with col1:
@@ -901,11 +925,31 @@ with st.form("send_form", clear_on_submit=True):
         submitted = st.form_submit_button("Send 🚀", use_container_width=True)
 
     if submitted and text.strip():
+        raw = text.strip()
         now = datetime.now().timestamp()
         st.session_state.send_times = [t for t in st.session_state.send_times if now - t < 2]
         if len(st.session_state.send_times) >= 3:
             st.warning("You're sending messages too fast — slow down a moment.")
+        elif raw.lower() == "/clear":
+            fresh = load_data()
+            fresh["rooms"][room] = [
+                m for m in fresh["rooms"].get(room, []) if m.get("user_id") != st.session_state.user_id
+            ]
+            save_data(fresh)
+            st.rerun()
         else:
+            import random
+            if raw.lower().startswith("/roll"):
+                sides = 6
+                parts = raw.split()
+                if len(parts) > 1 and parts[1].isdigit():
+                    sides = int(parts[1])
+                final_text = f"🎲 rolled a {random.randint(1, sides)} (d{sides})"
+            elif raw.lower() == "/shrug":
+                final_text = "¯\\_(ツ)_/¯"
+            else:
+                final_text = raw
+
             st.session_state.send_times.append(now)
             fresh = load_data()
             fresh["rooms"].setdefault(room, [])
@@ -913,9 +957,9 @@ with st.form("send_form", clear_on_submit=True):
                 "id": str(uuid.uuid4())[:10],
                 "user_id": st.session_state.user_id,
                 "name": st.session_state.username,
-                "text": text.strip(),
+                "text": final_text,
                 "time": datetime.now().isoformat(),
-                "reactions": {},
+                "pinned": False,
             })
             fresh["rooms"][room] = fresh["rooms"][room][-500:]
             save_data(fresh)
