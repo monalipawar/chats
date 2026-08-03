@@ -148,6 +148,11 @@ def load_data():
     d.setdefault("admin_uids", [])
     d.setdefault("medium_admin_uids", [])
     d.setdefault("low_admin_uids", [])
+    d.setdefault("banned_names", [])       # names blocked from (re)joining
+    d.setdefault("muted_uids", {})          # uid -> ISO timestamp mute expires
+    d.setdefault("audit_log", [])           # high-admin action history
+    d.setdefault("announcement", None)      # {"text","set_by","time"} or None
+    d.setdefault("room_meta", {})
 
     # Backfill ids for messages saved before delete support existed,
     # otherwise their delete button has nothing to key off of.
@@ -196,6 +201,19 @@ def load_data():
 def save_data(data):
     with open(DATA_FILE, "w") as f:
         json.dump(data, f, indent=2)
+
+
+def log_action(d, action, detail=""):
+    """Append an entry to the high-admin audit log. Caller is responsible
+    for calling save_data(d) afterward."""
+    actor = st.session_state.get("username", "?")
+    d.setdefault("audit_log", []).append({
+        "time": datetime.now().isoformat(),
+        "actor": actor,
+        "action": action,
+        "detail": detail,
+    })
+    d["audit_log"] = d["audit_log"][-300:]  # keep it bounded
 
 
 data = load_data()
@@ -292,6 +310,26 @@ def can_remove_people():
     return is_admin_user() or is_medium_admin_user() or is_low_admin_user()
 
 theme = THEMES[st.session_state.theme]
+
+# Enforce bans even for people already logged in via persisted identity
+# (localStorage/query params), not just at the join screen.
+if st.session_state.username and st.session_state.username.strip().lower() in [
+    b.lower() for b in data.get("banned_names", [])
+]:
+    st.session_state.username = None
+    st.session_state.identity_checked = True
+    st.query_params.clear()
+    components.html(
+        """
+        <script>
+        window.parent.localStorage.removeItem('nebulachat_uid');
+        window.parent.localStorage.removeItem('nebulachat_name');
+        </script>
+        """,
+        height=0,
+    )
+    st.error("This name has been banned from NebulaChat.")
+    st.stop()
 
 # If this session's user_id was merged away (duplicate-name cleanup),
 # adopt whichever uid the users table now has for this name so we don't
@@ -493,6 +531,10 @@ if not st.session_state.username:
             entered_name = name.strip()
             if entered_name:
                 fresh = load_data()
+
+                if entered_name.lower() in [b.lower() for b in fresh.get("banned_names", [])]:
+                    st.error("This name is banned from NebulaChat.")
+                    st.stop()
 
                 # If this name already belongs to someone, reuse that
                 # account instead of creating a new one.
@@ -772,6 +814,7 @@ with st.sidebar:
             save_data(live)
 
         now = datetime.now()
+        muted = live.get("muted_uids", {})
         for uid, u in list(live.get("users", {}).items()):
             try:
                 last_seen = datetime.fromisoformat(u["last_seen"])
@@ -779,10 +822,55 @@ with st.sidebar:
             except Exception:
                 active = False
             dot = "🟢" if active else "⚪"
-            if can_remove_people():
+            mute_tag = ""
+            mute_until = muted.get(uid)
+            if mute_until:
+                try:
+                    if datetime.fromisoformat(mute_until) > now:
+                        mute_tag = " 🔇"
+                except Exception:
+                    pass
+
+            if is_admin_user():
+                col_u, col_mute, col_ban, col_del = st.columns([4, 1, 1, 1])
+                with col_u:
+                    st.caption(f"{dot} {u['name']}{mute_tag}")
+                with col_mute:
+                    is_muted_now = bool(mute_tag)
+                    if st.button("🔊" if is_muted_now else "🔇", key=f"mute_{uid}",
+                                 help="Unmute" if is_muted_now else "Mute for 10 minutes"):
+                        fresh = load_data()
+                        fresh.setdefault("muted_uids", {})
+                        if is_muted_now:
+                            fresh["muted_uids"].pop(uid, None)
+                            log_action(fresh, "unmute", u.get("name", uid))
+                        else:
+                            until = datetime.now().timestamp() + 600
+                            fresh["muted_uids"][uid] = datetime.fromtimestamp(until).isoformat()
+                            log_action(fresh, "mute (10 min)", u.get("name", uid))
+                        save_data(fresh)
+                        full_rerun()
+                with col_ban:
+                    if st.button("⛔", key=f"ban_{uid}", help=f"Ban {u['name']} (removes + blocks rejoining)"):
+                        fresh = load_data()
+                        fresh.setdefault("banned_names", [])
+                        if u.get("name") and u["name"] not in fresh["banned_names"]:
+                            fresh["banned_names"].append(u["name"])
+                        fresh["users"].pop(uid, None)
+                        log_action(fresh, "ban", u.get("name", uid))
+                        save_data(fresh)
+                        full_rerun()
+                with col_del:
+                    if st.button("🗑️", key=f"deluser_{uid}", help=f"Remove {u['name']}"):
+                        fresh = load_data()
+                        fresh["users"].pop(uid, None)
+                        log_action(fresh, "remove person", u.get("name", uid))
+                        save_data(fresh)
+                        full_rerun()
+            elif can_remove_people():
                 col_u, col_del = st.columns([5, 1])
                 with col_u:
-                    st.caption(f"{dot} {u['name']}")
+                    st.caption(f"{dot} {u['name']}{mute_tag}")
                 with col_del:
                     if st.button("🗑️", key=f"deluser_{uid}", help=f"Remove {u['name']}"):
                         fresh = load_data()
@@ -790,7 +878,7 @@ with st.sidebar:
                         save_data(fresh)
                         full_rerun()
             else:
-                st.caption(f"{dot} {u['name']}")
+                st.caption(f"{dot} {u['name']}{mute_tag}")
 
     render_presence()
 
