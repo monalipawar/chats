@@ -7,7 +7,7 @@ import hashlib
 import io
 import zipfile
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ---------------------------------------------------------------------------
 # CONFIG
@@ -148,11 +148,25 @@ def load_data():
     d.setdefault("admin_uids", [])
     d.setdefault("medium_admin_uids", [])
     d.setdefault("low_admin_uids", [])
-    d.setdefault("banned_names", [])       # names blocked from (re)joining
+    d.setdefault("banned_names", {})        # name -> ISO timestamp when ban expires (max 24h)
     d.setdefault("muted_uids", {})          # uid -> ISO timestamp mute expires
     d.setdefault("audit_log", [])           # high-admin action history
     d.setdefault("announcement", None)      # {"text","set_by","time"} or None
     d.setdefault("room_meta", {})
+
+    # Migrate legacy list-format bans (pre-expiry version) into the dict
+    # format, and drop anything that's already expired.
+    if isinstance(d.get("banned_names"), list):
+        d["banned_names"] = {n: "" for n in d["banned_names"]}
+    now_iso = datetime.now().isoformat()
+    d["banned_names"] = {
+        n: exp for n, exp in d.get("banned_names", {}).items()
+        if not exp or exp > now_iso
+    }
+    d["muted_uids"] = {
+        u: exp for u, exp in d.get("muted_uids", {}).items()
+        if exp > now_iso
+    }
 
     # Backfill ids for messages saved before delete support existed,
     # otherwise their delete button has nothing to key off of.
@@ -278,6 +292,8 @@ if "dm_target" not in st.session_state:
     st.session_state.dm_target = None  # uid of the person you're DMing, or None for room mode
 if "replying_to" not in st.session_state:
     st.session_state.replying_to = None
+if "ban_target_uid" not in st.session_state:
+    st.session_state.ban_target_uid = None
 
 
 def is_admin_user():
@@ -314,7 +330,7 @@ theme = THEMES[st.session_state.theme]
 # Enforce bans even for people already logged in via persisted identity
 # (localStorage/query params), not just at the join screen.
 if st.session_state.username and st.session_state.username.strip().lower() in [
-    b.lower() for b in data.get("banned_names", [])
+    b.lower() for b in data.get("banned_names", {})
 ]:
     st.session_state.username = None
     st.session_state.identity_checked = True
@@ -532,8 +548,17 @@ if not st.session_state.username:
             if entered_name:
                 fresh = load_data()
 
-                if entered_name.lower() in [b.lower() for b in fresh.get("banned_names", [])]:
-                    st.error("This name is banned from NebulaChat.")
+                banned_lookup = {b.lower(): exp for b, exp in fresh.get("banned_names", {}).items()}
+                if entered_name.lower() in banned_lookup:
+                    exp = banned_lookup[entered_name.lower()]
+                    if exp:
+                        try:
+                            mins_left = max(1, int((datetime.fromisoformat(exp) - datetime.now()).total_seconds() // 60))
+                            st.error(f"This name is banned from NebulaChat for another {mins_left} minute(s).")
+                        except Exception:
+                            st.error("This name is banned from NebulaChat.")
+                    else:
+                        st.error("This name is banned from NebulaChat.")
                     st.stop()
 
                 # If this name already belongs to someone, reuse that
@@ -594,6 +619,8 @@ def show_recent_activity():
             if not room_admin_only and medium and not high:
                 continue  # medium-level admins only see admin rooms
         for m in msgs:
+            if m.get("deleted"):
+                continue
             all_msgs.append({**m, "room": room_name})
     all_msgs.sort(key=lambda m: m.get("time", ""), reverse=True)
 
@@ -652,6 +679,8 @@ def show_global_search():
             if not room_admin_only and medium and not high:
                 continue
         for m in msgs:
+            if m.get("deleted"):
+                continue
             if q in m["text"].lower():
                 results.append({**m, "room": room_name})
     results.sort(key=lambda m: m.get("time", ""), reverse=True)
@@ -716,10 +745,14 @@ with st.sidebar:
     st.divider()
     st.subheader("Rooms")
     data.setdefault("room_meta", {})
-    all_room_names = [r for r in data["rooms"].keys() if not is_dm_key(r)]
 
     def _is_admin_only(rname):
         return data["room_meta"].get(rname, {}).get("admin_only", False)
+
+    def _is_archived(rname):
+        return data["room_meta"].get(rname, {}).get("archived", False)
+
+    all_room_names = [r for r in data["rooms"].keys() if not is_dm_key(r) and not _is_archived(r)]
 
     if is_admin_user():
         room_names = all_room_names  # high-level admin sees everything
@@ -758,6 +791,18 @@ with st.sidebar:
                     if st.session_state.current_room == r:
                         st.session_state.current_room = next(iter(fresh["rooms"]), "General")
                     full_rerun()
+
+    if is_admin_user():
+        archived_names = [
+            r for r in data["rooms"].keys() if not is_dm_key(r) and _is_archived(r)
+        ]
+        if archived_names:
+            with st.expander(f"📦 Archived rooms ({len(archived_names)})"):
+                for ar in archived_names:
+                    if st.button(f"# {ar}", key=f"archroom_{ar}", use_container_width=True):
+                        st.session_state.current_room = ar
+                        st.session_state.dm_target = None
+                        st.rerun()
 
     if not is_medium_admin_user() or is_admin_user():
         with st.expander("➕ New room"):
@@ -832,6 +877,31 @@ with st.sidebar:
                     pass
 
             if is_admin_user():
+                if st.session_state.get("ban_target_uid") == uid:
+                    st.caption(f"⛔ Ban **{u['name']}** for how long?")
+                    hours = st.slider(
+                        "Hours", min_value=1, max_value=24, value=1,
+                        key=f"banhours_{uid}", label_visibility="collapsed",
+                    )
+                    bc1, bc2 = st.columns(2)
+                    with bc1:
+                        if st.button("Confirm ban", key=f"banconfirm_{uid}", use_container_width=True):
+                            fresh = load_data()
+                            fresh.setdefault("banned_names", {})
+                            expiry = (datetime.now() + timedelta(hours=hours)).isoformat()
+                            if u.get("name"):
+                                fresh["banned_names"][u["name"]] = expiry
+                            fresh["users"].pop(uid, None)
+                            log_action(fresh, f"ban ({hours}h)", u.get("name", uid))
+                            save_data(fresh)
+                            st.session_state.ban_target_uid = None
+                            full_rerun()
+                    with bc2:
+                        if st.button("Cancel", key=f"bancancel_{uid}", use_container_width=True):
+                            st.session_state.ban_target_uid = None
+                            full_rerun()
+                    continue
+
                 col_u, col_mute, col_ban, col_del = st.columns([4, 1, 1, 1])
                 with col_u:
                     st.caption(f"{dot} {u['name']}{mute_tag}")
@@ -851,14 +921,8 @@ with st.sidebar:
                         save_data(fresh)
                         full_rerun()
                 with col_ban:
-                    if st.button("⛔", key=f"ban_{uid}", help=f"Ban {u['name']} (removes + blocks rejoining)"):
-                        fresh = load_data()
-                        fresh.setdefault("banned_names", [])
-                        if u.get("name") and u["name"] not in fresh["banned_names"]:
-                            fresh["banned_names"].append(u["name"])
-                        fresh["users"].pop(uid, None)
-                        log_action(fresh, "ban", u.get("name", uid))
-                        save_data(fresh)
+                    if st.button("⛔", key=f"ban_{uid}", help=f"Ban {u['name']} (you choose duration, up to 24h)"):
+                        st.session_state.ban_target_uid = uid
                         full_rerun()
                 with col_del:
                     if st.button("🗑️", key=f"deluser_{uid}", help=f"Remove {u['name']}"):
@@ -935,6 +999,105 @@ with st.sidebar:
                 else:
                     st.error("Wrong passcode.")
 
+    if is_admin_user():
+        with st.expander("🛡️ High Admin Panel"):
+            st.markdown("**Promote / demote**")
+            for uid, u in data.get("users", {}).items():
+                if uid == st.session_state.user_id:
+                    continue  # don't let yourself get demoted by accident here
+                current_tier = (
+                    "High" if uid in data.get("admin_uids", [])
+                    else "Medium" if uid in data.get("medium_admin_uids", [])
+                    else "Low" if uid in data.get("low_admin_uids", [])
+                    else "None"
+                )
+                pcol1, pcol2 = st.columns([2, 2])
+                with pcol1:
+                    st.caption(f"{u.get('name','?')} — *{current_tier}*")
+                with pcol2:
+                    new_tier = st.selectbox(
+                        "Tier", ["None", "Low", "Medium", "High"],
+                        index=["None", "Low", "Medium", "High"].index(current_tier),
+                        key=f"tier_{uid}", label_visibility="collapsed",
+                    )
+                if new_tier != current_tier:
+                    if st.button("Apply", key=f"applytier_{uid}"):
+                        fresh = load_data()
+                        for k in ["admin_uids", "medium_admin_uids", "low_admin_uids"]:
+                            fresh.setdefault(k, [])
+                            if uid in fresh[k]:
+                                fresh[k].remove(uid)
+                        if new_tier == "High":
+                            fresh["admin_uids"].append(uid)
+                        elif new_tier == "Medium":
+                            fresh["medium_admin_uids"].append(uid)
+                        elif new_tier == "Low":
+                            fresh["low_admin_uids"].append(uid)
+                        log_action(fresh, "change admin tier", f"{u.get('name', uid)}: {current_tier} -> {new_tier}")
+                        save_data(fresh)
+                        full_rerun()
+
+            st.divider()
+            st.markdown("**Banned names**")
+            banned = data.get("banned_names", {})
+            if not banned:
+                st.caption("Nobody is currently banned.")
+            else:
+                for name, exp in banned.items():
+                    try:
+                        mins_left = max(0, int((datetime.fromisoformat(exp) - datetime.now()).total_seconds() // 60))
+                    except Exception:
+                        mins_left = "?"
+                    ucol1, ucol2 = st.columns([3, 1])
+                    with ucol1:
+                        st.caption(f"{name} — {mins_left} min left")
+                    with ucol2:
+                        if st.button("Unban", key=f"unban_{name}"):
+                            fresh = load_data()
+                            fresh.get("banned_names", {}).pop(name, None)
+                            log_action(fresh, "unban", name)
+                            save_data(fresh)
+                            full_rerun()
+
+            st.divider()
+            st.markdown("**Global announcement**")
+            current_announce = data.get("announcement")
+            ann_text = st.text_input(
+                "Shown at the top of every room", value=(current_announce or {}).get("text", ""),
+                key="announcement_input", max_chars=200,
+            )
+            acol1, acol2 = st.columns(2)
+            with acol1:
+                if st.button("Post announcement", use_container_width=True):
+                    fresh = load_data()
+                    fresh["announcement"] = {
+                        "text": ann_text.strip(), "set_by": st.session_state.username,
+                        "time": datetime.now().isoformat(),
+                    }
+                    log_action(fresh, "post announcement", ann_text.strip()[:60])
+                    save_data(fresh)
+                    full_rerun()
+            with acol2:
+                if current_announce and st.button("Clear announcement", use_container_width=True):
+                    fresh = load_data()
+                    fresh["announcement"] = None
+                    log_action(fresh, "clear announcement")
+                    save_data(fresh)
+                    full_rerun()
+
+            st.divider()
+            st.markdown("**Audit log** (most recent first)")
+            log = list(reversed(data.get("audit_log", [])))[:40]
+            if not log:
+                st.caption("No admin actions logged yet.")
+            else:
+                for entry in log:
+                    st.caption(
+                        f"`{relative_time(entry.get('time',''))}` **{entry.get('actor','?')}** "
+                        f"{entry.get('action','?')}"
+                        + (f" — {entry.get('detail')}" if entry.get("detail") else "")
+                    )
+
     st.divider()
     auto_refresh = st.checkbox("🔄 Auto-refresh", value=True)
 
@@ -951,6 +1114,7 @@ with st.sidebar:
             lines = [
                 f"[{m.get('time','')}] {m['name']}: {m['text']}"
                 for m in sorted(msgs, key=lambda x: x.get("time", ""))
+                if not m.get("deleted")
             ]
             zf.writestr(f"{room_name}.txt", "\n".join(lines) if lines else "(no messages)")
     st.download_button(
@@ -1056,6 +1220,17 @@ st.session_state.last_read[room] = len(data["rooms"][room])
 data.setdefault("room_meta", {})
 topic = data["room_meta"].get(room, {}).get("topic", "") if not is_dm_mode else ""
 
+announcement = data.get("announcement")
+if announcement and announcement.get("text"):
+    st.markdown(
+        f'<div class="glass-card" style="border-left: 4px solid {theme["secondary"]}; margin-bottom: 1rem;">'
+        f'<b>📢 Announcement</b> — {announcement["text"]}'
+        f'<div style="font-size:0.7rem; color:rgba(255,255,255,0.4); margin-top:4px;">'
+        f'— {announcement.get("set_by","?")}, {relative_time(announcement.get("time",""))}</div>'
+        f'</div>',
+        unsafe_allow_html=True,
+    )
+
 header_l, header_r = st.columns([6, 1])
 with header_l:
     title_prefix = "🔒 " if (not is_dm_mode and data["room_meta"].get(room, {}).get("admin_only", False)) else ""
@@ -1074,7 +1249,7 @@ with header_r:
             show_recent_activity()
 
 if not is_dm_mode and is_admin_user():
-    with st.expander("✏️ Edit room topic"):
+    with st.expander("🛠️ Room Admin Tools"):
         new_topic = st.text_input("Topic", value=topic, key=f"topic_{room}", max_chars=80)
         if st.button("Save topic", key=f"savetopic_{room}"):
             fresh = load_data()
@@ -1082,9 +1257,69 @@ if not is_dm_mode and is_admin_user():
             save_data(fresh)
             full_rerun()
 
+        st.divider()
+        is_locked = data["room_meta"].get(room, {}).get("locked", False)
+        lock_col, clear_col = st.columns(2)
+        with lock_col:
+            if st.button("🔓 Unlock room" if is_locked else "🔒 Lock room (read-only)",
+                         key=f"lock_{room}", use_container_width=True):
+                fresh = load_data()
+                fresh.setdefault("room_meta", {}).setdefault(room, {})["locked"] = not is_locked
+                log_action(fresh, "unlock room" if is_locked else "lock room", room)
+                save_data(fresh)
+                full_rerun()
+        with clear_col:
+            if st.button("🧹 Clear entire history", key=f"clearroom_{room}", use_container_width=True):
+                st.session_state[f"confirm_clear_{room}"] = True
+                st.rerun()
+        if st.session_state.get(f"confirm_clear_{room}"):
+            st.warning(f"This permanently wipes every message in #{room}. Are you sure?")
+            cc1, cc2 = st.columns(2)
+            with cc1:
+                if st.button("Yes, wipe it", key=f"confirmclear_{room}", use_container_width=True):
+                    fresh = load_data()
+                    count = len(fresh["rooms"].get(room, []))
+                    fresh["rooms"][room] = []
+                    log_action(fresh, "force-clear room", f"{room} ({count} messages)")
+                    save_data(fresh)
+                    st.session_state[f"confirm_clear_{room}"] = False
+                    full_rerun()
+            with cc2:
+                if st.button("Cancel", key=f"cancelclear_{room}", use_container_width=True):
+                    st.session_state[f"confirm_clear_{room}"] = False
+                    st.rerun()
+
+        st.divider()
+        rn1, rn2 = st.columns([3, 1])
+        with rn1:
+            renamed = st.text_input("Rename room to", key=f"rename_{room}", label_visibility="collapsed",
+                                     placeholder="New room name")
+        with rn2:
+            if st.button("Rename", key=f"dorename_{room}", use_container_width=True):
+                new_name = renamed.strip()
+                if new_name and new_name != room and new_name not in data["rooms"]:
+                    fresh = load_data()
+                    fresh["rooms"][new_name] = fresh["rooms"].pop(room, [])
+                    if room in fresh.get("room_meta", {}):
+                        fresh["room_meta"][new_name] = fresh["room_meta"].pop(room)
+                    log_action(fresh, "rename room", f"{room} -> {new_name}")
+                    save_data(fresh)
+                    st.session_state.current_room = new_name
+                    full_rerun()
+                elif new_name in data["rooms"]:
+                    st.warning("A room with that name already exists.")
+
+        is_archived = data["room_meta"].get(room, {}).get("archived", False)
+        if st.button("📦 Unarchive room" if is_archived else "📦 Archive room", key=f"archive_{room}"):
+            fresh = load_data()
+            fresh.setdefault("room_meta", {}).setdefault(room, {})["archived"] = not is_archived
+            log_action(fresh, "unarchive room" if is_archived else "archive room", room)
+            save_data(fresh)
+            full_rerun()
+
 # Pinned messages strip (rooms only — pinning doesn't apply to private DMs)
 if not is_dm_mode:
-    pinned_msgs = [m for m in data["rooms"][room] if m.get("pinned")][-PIN_LIMIT:]
+    pinned_msgs = [m for m in data["rooms"][room] if m.get("pinned") and not m.get("deleted")][-PIN_LIMIT:]
     if pinned_msgs:
         with st.expander(f"📌 Pinned ({len(pinned_msgs)})", expanded=False):
             for pm in pinned_msgs:
@@ -1105,6 +1340,8 @@ with search_col:
 with export_col:
     export_lines = []
     for m in sorted(data["rooms"][room], key=lambda x: x.get("time", "")):
+        if m.get("deleted"):
+            continue
         ts = m.get("time", "")
         export_lines.append(f"[{ts}] {m['name']}: {m['text']}")
     export_text = "\n".join(export_lines) if export_lines else "(no messages)"
@@ -1243,7 +1480,21 @@ def render_chat():
             ) if show_meta else ""
 
             can_delete = msg_id and (is_mine or is_admin_user())
-            can_edit = msg_id and is_mine
+            can_edit = msg_id and (is_mine or is_admin_user())
+
+            if msg.get("deleted"):
+                if not is_admin_user():
+                    continue  # gone for everyone except high admin oversight
+                st.markdown(
+                    f'<div class="{row_class}">'
+                    f'<div class="avatar" style="background:{color}; opacity:0.4;">{initials(msg["name"])}</div>'
+                    f'<div>{meta_html}'
+                    f'<div class="{bubble_class}" style="opacity:0.45; font-style:italic;">'
+                    f'[deleted by {msg.get("deleted_by","?")}] {msg["text"]}'
+                    f'</div></div></div>',
+                    unsafe_allow_html=True,
+                )
+                continue
 
             if st.session_state.editing_msg_id == msg_id:
                 new_text = st.text_input(
@@ -1258,6 +1509,8 @@ def render_chat():
                             if m.get("id") == msg_id:
                                 m["text"] = new_text.strip() or m["text"]
                                 m["edited"] = True
+                        if is_admin_user() and not is_mine:
+                            log_action(fresh, "edit someone's message", f'{msg["name"]}: {new_text.strip()[:60]}')
                         save_data(fresh)
                         st.session_state.editing_msg_id = None
                         full_rerun()
@@ -1316,14 +1569,17 @@ def render_chat():
                 with action_cols[col_idx]:
                     if st.button("🗑️", key=f"del_{msg_id}", help="Delete"):
                         fresh = load_data()
-                        fresh["rooms"][room] = [
-                            m for m in fresh["rooms"].get(room, []) if m.get("id") != msg_id
-                        ]
+                        for m in fresh["rooms"].get(room, []):
+                            if m.get("id") == msg_id:
+                                m["deleted"] = True
+                                m["deleted_by"] = st.session_state.username
+                        if is_admin_user() and not is_mine:
+                            log_action(fresh, "delete someone's message", f'{msg["name"]}: {msg["text"][:60]}')
                         save_data(fresh)
                         full_rerun()
 
         # Read receipt on your most recent message in this thread
-        my_msgs = [m for m in msgs if m["user_id"] == st.session_state.user_id]
+        my_msgs = [m for m in msgs if m["user_id"] == st.session_state.user_id and not m.get("deleted")]
         if my_msgs:
             last_mine = my_msgs[-1]
             seers = []
@@ -1396,8 +1652,18 @@ with st.form("send_form", clear_on_submit=True):
     if submitted and text.strip():
         raw = text.strip()
         now = datetime.now().timestamp()
+
+        fresh_check = load_data()
+        mute_until = fresh_check.get("muted_uids", {}).get(st.session_state.user_id)
+        room_locked = fresh_check.get("room_meta", {}).get(room, {}).get("locked", False)
         st.session_state.send_times = [t for t in st.session_state.send_times if now - t < 2]
-        if len(st.session_state.send_times) >= 3:
+
+        if mute_until and datetime.fromisoformat(mute_until) > datetime.now():
+            mins_left = max(1, int((datetime.fromisoformat(mute_until) - datetime.now()).total_seconds() // 60))
+            st.warning(f"You're muted for another {mins_left} minute(s).")
+        elif room_locked and not is_admin_user():
+            st.warning("This room is locked — only the high-level admin can post here.")
+        elif len(st.session_state.send_times) >= 3:
             st.warning("You're sending messages too fast — slow down a moment.")
         elif raw.lower() == "/clear":
             fresh = load_data()
